@@ -3,8 +3,9 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const net = require("node:net");
+require('dotenv').config();
 
-const PORT = process.env.LAUNCHER_PORT || 7777;
+const PORT = process.env.PORT || 7777;
 const CONFIG_PATH = path.join(__dirname, "config.json");
 
 const app = express();
