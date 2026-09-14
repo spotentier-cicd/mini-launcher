@@ -1,13 +1,14 @@
 const express = require("express");
-const { spawn } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const net = require("net");
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const net = require("node:net");
 
 const PORT = process.env.LAUNCHER_PORT || 7777;
 const CONFIG_PATH = path.join(__dirname, "config.json");
 
 const app = express();
+app.disable('x-powered-by');
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -43,8 +44,8 @@ function detectPort(dir) {
   if (fs.existsSync(envPath)) {
     try {
       const content = fs.readFileSync(envPath, "utf-8");
-      const m = content.match(/^\s*PORT\s*=\s*(\d+)/m);
-      if (m) return parseInt(m[1], 10);
+      const m = content.match(/^(?:[ \t]*)PORT[ \t]*=[ \t]*(\d+)/m);
+      if (m) return Number.parseInt(m[1], 10);
     } catch {
       // fichier illisible, on ignore
     }
@@ -148,9 +149,10 @@ app.get("/api/projects", async (req, res) => {
       const entry = running.get(p.id);
       const managedByUs = !!entry;
       const portOpen = p.port ? await checkPort(p.port) : null;
+      const other = portOpen ? "external" : "stopped";
       return {
         ...p,
-        status: managedByUs ? "running" : portOpen ? "external" : "stopped",
+        status: managedByUs ? "running" : other,
         pid: entry ? entry.proc.pid : null,
         startedAt: entry ? entry.startedAt : null,
       };

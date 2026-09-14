@@ -115,7 +115,7 @@ async function act(id, action, body) {
     const data = await res.json();
     if (!res.ok) toast(data.error || "Une erreur est survenue");
   } catch (e) {
-    toast("Impossible de contacter le dashboard");
+    toast(e.message + " : Impossible de contacter le dashboard");
   }
   await load();
 }

@@ -3,20 +3,20 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Panneau de contrôle — projets locaux</title>
+<title>Control panel — local projects</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-title">
-      <h1>Panneau de contrôle</h1>
-      <p id="subtitle">chargement des projets…</p>
+      <h1>Control panel</h1>
+      <p id="subtitle">loading projects…</p>
     </div>
-    <button id="refresh" class="btn ghost" title="Rafraîchir">↻ Rafraîchir</button>
+    <button id="refresh" class="btn ghost" title="Rafraîchir">Refresh</button>
   </header>
 
   <main id="board" class="board">
-    <p class="empty">Chargement…</p>
+    <p class="empty">Loading ...</p>
   </main>
 
   <template id="row-template">
@@ -29,10 +29,10 @@
         </div>
         <div class="row-port"></div>
         <div class="row-actions">
-          <a class="btn open" target="_blank" rel="noopener">Ouvrir ↗</a>
+          <a class="btn open" target="_blank" rel="noopener">Open</a>
           <select class="script-select"></select>
-          <button class="btn start">Démarrer</button>
-          <button class="btn stop danger">Arrêter</button>
+          <button class="btn start">Start</button>
+          <button class="btn stop danger">Stop</button>
           <button class="btn logs-toggle ghost">Logs</button>
         </div>
       </div>
