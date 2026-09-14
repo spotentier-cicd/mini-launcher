@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Panneau de contrôle — projets locaux</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-title">
+      <h1>Panneau de contrôle</h1>
+      <p id="subtitle">chargement des projets…</p>
+    </div>
+    <button id="refresh" class="btn ghost" title="Rafraîchir">↻ Rafraîchir</button>
+  </header>
+
+  <main id="board" class="board">
+    <p class="empty">Chargement…</p>
+  </main>
+
+  <template id="row-template">
+    <div class="row" data-id="">
+      <div class="row-main">
+        <span class="dot"></span>
+        <div class="row-text">
+          <div class="row-name"></div>
+          <div class="row-path"></div>
+        </div>
+        <div class="row-port"></div>
+        <div class="row-actions">
+          <a class="btn open" target="_blank" rel="noopener">Ouvrir ↗</a>
+          <select class="script-select"></select>
+          <button class="btn start">Démarrer</button>
+          <button class="btn stop danger">Arrêter</button>
+          <button class="btn logs-toggle ghost">Logs</button>
+        </div>
+      </div>
+      <pre class="logs hidden"></pre>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

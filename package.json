@@ -1,0 +1,13 @@
+{
+  "name": "mini-launcher",
+  "version": "1.0.0",
+  "description": "Tableau de bord local pour lancer et ouvrir tes petits projets Express/Hono/etc.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
