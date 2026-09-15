@@ -16,14 +16,30 @@ npm start          # démarre le dashboard (port depuis .env, 7777 par défaut)
 
 Aucun build, aucun bundler, aucune étape de compilation : `public/` est servi tel quel.
 
-**Il n'y a pas de suite de tests.** Pour vérifier une modification, lancer le serveur sur
-un port libre avec un `ROOT_DIR` factice et l'interroger :
-
 ```bash
-PORT=7911 ROOT_DIR=/tmp/fakeroot node server.js &
-curl -s -c /tmp/c.txt -d "password=$PW" http://127.0.0.1:7911/login   # ouvre une session
-curl -s -N -b /tmp/c.txt http://127.0.0.1:7911/api/events             # observe le flux
+npm test                              # toute la suite (vitest)
+npx vitest run tests/auth.test.js     # un seul fichier
+npx vitest run -t "réadopte"          # un seul test, par son nom
+npm run test:watch                    # mode veille
 ```
+
+Les tests sont **d'intégration** : chacun démarre un vrai `server.js` en process enfant,
+sur un port libre, avec un `ROOT_DIR` temporaire rempli de faux projets. Rien n'est moqué,
+donc ils couvrent ce qui casse réellement ici — spawn, ports, sessions, flux SSE.
+
+`tests/helpers.js` porte tout le harnais : `startLauncher()` (démarre et attend l'écoute),
+`addProject()` (fabrique un faux projet), `waitFor()` (attente sur condition, jamais de
+`sleep`), `cleanupAll()`.
+
+Deux points à respecter en ajoutant un test :
+
+- **Toujours `afterEach(cleanupAll)`.** Les projets sont lancés `detached` : sans
+  `stopProjects()`, tuer le launcher les laisse tourner et la suite fuit des process.
+- **Jamais de port en dur** — `freePort()`. Les fichiers tournent en série
+  (`fileParallelism: false`) mais les ports restent alloués dynamiquement.
+
+Le harnais impose deux surcharges au serveur, `LOG_DIR` et `CONFIG_PATH`, pour qu'aucun
+test n'écrive dans `logs/` ni ne lise le `config.json` du dépôt.
 
 Pour une capture d'écran en headless : utiliser `--timeout=2500`, **pas**
 `--virtual-time-budget`. Le flux SSE reste ouvert en permanence, donc le temps virtuel

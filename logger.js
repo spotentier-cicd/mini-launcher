@@ -2,7 +2,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const winston = require("winston");
 
-const LOG_DIR = path.join(__dirname, "logs");
+// Surchargeable pour que les tests n'écrivent pas dans le dossier du projet.
+const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, "logs");
 const ERROR_LOG = path.join(LOG_DIR, "error.log");
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -59,5 +60,6 @@ process.on("unhandledRejection", (reason) => {
 });
 
 logger.logPath = ERROR_LOG;
+logger.logDir = LOG_DIR;
 
 module.exports = logger;

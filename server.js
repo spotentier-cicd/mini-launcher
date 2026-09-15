@@ -11,7 +11,7 @@ const logger = require("./logger");
 const PORT = process.env.PORT || 7777;
 const ROOT_DIR = process.env.ROOT_DIR || "../";
 const SCAN_DEPTH = process.env.SCAN_DEPTH || 2;
-const CONFIG_PATH = path.join(__dirname, "config.json");
+const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "config.json");
 
 // La config du launcher ne doit pas fuiter dans les projets qu'il lance :
 // dotenv n'écrase jamais une variable déjà définie, donc un PORT hérité gagne
@@ -23,6 +23,8 @@ const LAUNCHER_ENV_KEYS = new Set([
   "ROOT_DIR",
   "SCAN_DEPTH",
   "DASHBOARD_PASSWORD",
+  "LOG_DIR",
+  "CONFIG_PATH",
 ]);
 
 function childEnv() {
@@ -152,7 +154,7 @@ const logSeq = new Map();
 /** @type {Map<string, number>} port lu dans la sortie du projet, plus fiable que son .env */
 const detectedPorts = new Map();
 
-const STATE_PATH = path.join(__dirname, "logs", "running.json");
+const STATE_PATH = path.join(logger.logDir, "running.json");
 
 // Vite, Next, Hono… annoncent tous leur adresse au démarrage. La lire évite de
 // dépendre d'un PORT dans le .env du projet, que la plupart n'ont pas.

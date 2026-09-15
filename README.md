@@ -162,6 +162,18 @@ Port 3000 is already in use by node (PID 42988). Free it before starting.
 L'identification du process repose sur `lsof` ; là où il n'existe pas, le conflit est
 signalé sans nommer le coupable.
 
+## Tests
+
+```bash
+npm test
+```
+
+Suite d'intégration sous vitest : chaque test démarre un vrai launcher sur un port libre,
+avec des projets factices dans un dossier temporaire. Elle couvre l'authentification et le
+blocage d'IP, la détection des projets et les overrides, le cycle start/stop/restart, les
+conflits de port, le flux SSE, la détection du port dans la sortie, la reprise des
+orphelins après un arrêt brutal, et l'isolation de l'environnement des projets.
+
 ## Journal des erreurs
 
 Les problèmes sont écrits dans **`logs/error.log`** (créé automatiquement, ignoré par git),

@@ -5,11 +5,16 @@
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.1"
   }
 }
