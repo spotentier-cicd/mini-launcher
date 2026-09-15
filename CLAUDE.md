@@ -1,0 +1,144 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Ce que fait l'outil
+
+Tableau de bord local qui **détecte, lance et arrête d'autres projets Node**. Le serveur
+est donc à la fois une application web et un superviseur de process enfants : toute
+modification touche l'un ou l'autre, rarement les deux au même endroit.
+
+## Commandes
+
+```bash
+npm start          # démarre le dashboard (port depuis .env, 7777 par défaut)
+```
+
+Aucun build, aucun bundler, aucune étape de compilation : `public/` est servi tel quel.
+
+**Il n'y a pas de suite de tests.** Pour vérifier une modification, lancer le serveur sur
+un port libre avec un `ROOT_DIR` factice et l'interroger :
+
+```bash
+PORT=7911 ROOT_DIR=/tmp/fakeroot node server.js &
+curl -s -c /tmp/c.txt -d "password=$PW" http://127.0.0.1:7911/login   # ouvre une session
+curl -s -N -b /tmp/c.txt http://127.0.0.1:7911/api/events             # observe le flux
+```
+
+Pour une capture d'écran en headless : utiliser `--timeout=2500`, **pas**
+`--virtual-time-budget`. Le flux SSE reste ouvert en permanence, donc le temps virtuel
+n'avance jamais et Chrome ne rend jamais la main.
+
+## Configuration : le piège
+
+`loadConfig()` lit `config.json`, **mais n'en tire que `overrides`**. `rootDir` et
+`scanDepth` viennent de `.env` (`ROOT_DIR`, `SCAN_DEPTH`) malgré ce que suggère le nom de
+la fonction et d'anciennes versions du README. Les variables sont déclarées en tête de
+`server.js`. `.env` est suivi par git — attention à ce qu'on y écrit.
+
+## Architecture
+
+### Le flux SSE est le seul canal de mise à jour
+
+Le navigateur **ne fait aucun polling**. Il ouvre `/api/events` et le serveur y pousse
+trois types d'évènements : `projects` (état complet), `log` (un chunk de sortie) et
+`failure` (erreur de configuration).
+
+Conséquence directe : **toute mutation d'état côté serveur doit appeler `pushState()`**,
+sinon l'interface ne bouge pas. C'est le piège principal en ajoutant une route.
+
+`pushState()` ne fait rien si aucun client n'est connecté, et ne diffuse que si le JSON a
+changé depuis le dernier envoi (`lastStateJson`). La boucle de scan (`startStateLoop` /
+`stopStateLoop`) n'existe que tant que `sseClients` est non vide : sans onglet ouvert, le
+serveur ne lit pas le disque.
+
+### `running` et `logsById` sont volontairement séparés
+
+- `running` : uniquement les process vivants. Pilote le statut et le `pid`.
+- `logsById` : **survit à la sortie du process**, pour pouvoir lire la cause d'un crash.
+
+Les fusionner réintroduit un bug déjà corrigé (les logs disparaissaient au moment précis
+où on voulait les lire).
+
+`pushLog()` est le seul point d'entrée pour ajouter de la sortie : il incrémente `logSeq`
+(compteur monotone par projet) et diffuse le chunk. Le client compare les numéros, détecte
+un trou et se resynchronise via `GET /api/projects/:id/logs`, qui renvoie `{ logs, seq }`.
+
+### Les quatre statuts
+
+Calculés dans `computeState()` en croisant « lancé par nous » et « le port répond » :
+
+| | port répond | port muet / inconnu |
+| --- | --- | --- |
+| **lancé par le dashboard** | `running` | `starting` |
+| **non lancé par nous** | `external` | `stopped` |
+
+`starting` existe pour que le bouton **Open** ne pointe pas vers un serveur qui n'écoute
+pas encore. `watchUntilReady()` sonde le port toutes les 400 ms pendant 30 s après un
+lancement afin de basculer sans attendre le tour de boucle suivant.
+
+### L'ordre des middlewares d'authentification est critique
+
+La barrière est un `app.use()` au milieu de `server.js`. Tout ce qui est enregistré
+**avant** est public (`/login`, `/logout`, `/api/session`) ; tout ce qui vient **après**
+exige une session — y compris `express.static`. Une nouvelle route placée trop haut
+devient publique par accident.
+
+`OPEN_PATHS` liste les exceptions (`/login`, `/style.css`, `/favicon.ico`). Les sessions
+vivent en mémoire : un redémarrage déconnecte tout le monde. `DASHBOARD_PASSWORD` vide
+désactive entièrement l'authentification.
+
+### Front : vanilla, contrat par sélecteurs
+
+Pas de framework. `renderRow()` clone `#row-template` et remplit par classes. Ces
+sélecteurs forment un **contrat entre `index.html` et `app.js`** ; en renommer un dans le
+markup casse le rendu silencieusement :
+
+```
+.row-name  .row-path  .row-port  .open  .script-select
+.start  .start-label  .icon-start  .icon-restart  .stop  .logs-toggle  .logs
+```
+
+Le board est intégralement re-rendu à chaque évènement `projects`. C'est acceptable parce
+que ces évènements n'arrivent que sur changement réel.
+
+**Start et Restart partagent un seul bouton** (`.start`) : `setAction()` permute les icônes
+et le libellé selon l'état.
+
+### Journalisation
+
+`logger.js` (winston) : `logs/error.log` reçoit `warn` et au-dessus, la console reçoit
+`info` et au-dessus. Le fonctionnement normal n'encombre donc pas le fichier.
+
+Les `exceptionHandlers` natifs de winston **ne sont volontairement pas utilisés** : ils
+écrivent leur propre dump JSON en ignorant le format configuré. Des handlers
+`process.on("uncaughtException" / "unhandledRejection")` les remplacent dans `logger.js`.
+
+## Pièges rencontrés
+
+- **`hidden` sur un `<svg>` ne marche pas.** C'est une propriété de `HTMLElement` ;
+  `svg.hidden = false` crée un expando sans toucher l'attribut. Utiliser
+  `toggleAttribute("hidden", bool)`.
+- **`[hidden] { display: none !important }`** est nécessaire dans `style.css` : `.btn` et
+  `.icon` posent leur propre `display`, qui écrase la feuille du navigateur.
+- **Le scroll des logs ne doit recoller en bas que si on y était déjà**, sinon la vue est
+  arrachée à quelqu'un qui est remonté lire une erreur.
+- `child.on("exit")` reçoit `code === null` quand le process est tué par signal.
+
+## Convention de commit
+
+`type(MNLCH-N): description` — une seule ligne, description en anglais minuscule, `N`
+incrémenté à chaque commit. Exemples réels :
+
+```
+feat(MNLCH-8): sse live updates, ready state, restart button
+fix(MNLCH-6): logs in flight refresh
+```
+
+Branche de travail : `dev`. Branche principale : `main`.
+
+## Point ouvert
+
+`app.listen(PORT, …)` n'a pas d'argument d'hôte : le dashboard écoute sur toutes les
+interfaces alors qu'il exécute des commandes arbitraires. Signalé, non corrigé — le
+correctif est `app.listen(PORT, "127.0.0.1", …)`.
