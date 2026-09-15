@@ -1,3 +1,6 @@
 node_modules/
 .env
 logs/
+
+# généré par `npm run build` depuis src/
+public/app.js

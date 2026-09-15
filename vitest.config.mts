@@ -7,6 +7,6 @@ export default defineConfig({
     testTimeout: process.env.CI ? 45000 : 20000,
     hookTimeout: process.env.CI ? 45000 : 20000,
     fileParallelism: false,
-    include: ["tests/**/*.test.js"],
+    include: ["tests/**/*.test.ts"],
   },
 });

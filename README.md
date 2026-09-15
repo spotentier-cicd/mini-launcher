@@ -164,6 +164,23 @@ Port 3000 is already in use by node (PID 42988). Free it before starting.
 L'identification du process repose sur `lsof` ; là où il n'existe pas, le conflit est
 signalé sans nommer le coupable.
 
+## TypeScript
+
+Le code est en TypeScript. **Le serveur n'est pas compilé** : Node ≥ 22.18 efface les
+types à l'exécution, donc `node server.ts` fonctionne directement. Seul le front doit
+l'être, un navigateur ne lisant pas de TypeScript :
+
+```bash
+npm run build       # src/app.ts -> public/app.js  (fait aussi par npm start)
+npm run build:watch # pendant le développement du front
+npm run typecheck   # vérifie serveur, navigateur et tests
+```
+
+`public/app.js` est un fichier généré, ignoré par git : éditer `src/app.ts`.
+
+Node ne vérifiant rien à l'exécution, `npm run typecheck` est le seul garde-fou sur les
+types. Le CI le lance à chaque push.
+
 ## Tests
 
 ```bash

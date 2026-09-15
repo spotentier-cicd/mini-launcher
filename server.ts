@@ -1,16 +1,92 @@
-const express = require("express");
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const path = require("node:path");
-const net = require("node:net");
-const crypto = require("node:crypto");
-const { execFileSync } = require("node:child_process");
-const launcherEnv = require('dotenv').config();
-const logger = require("./logger");
+const express = require("express") as typeof import("express");
+const { spawn, execFileSync } = require("node:child_process") as typeof import("node:child_process");
+const fs = require("node:fs") as typeof import("node:fs");
+const path = require("node:path") as typeof import("node:path");
+const net = require("node:net") as typeof import("node:net");
+const crypto = require("node:crypto") as typeof import("node:crypto");
+const launcherEnv = (require("dotenv") as typeof import("dotenv")).config();
+const logger = require("./logger.ts") as import("winston").Logger & {
+  logPath: string;
+  logDir: string;
+};
 
-const PORT = process.env.PORT || 7777;
+type Request = import("express").Request;
+type Response = import("express").Response;
+type NextFunction = import("express").NextFunction;
+type ChildProcess = import("node:child_process").ChildProcess;
+
+/** Un projet tel que découvert sur le disque, avant calcul de son statut. */
+interface Project {
+  id: string;
+  name: string;
+  cwd: string;
+  scripts: string[];
+  defaultScript: string | null;
+  port: number | null;
+  url: string | null;
+  /** Fournis par une override de config.json. */
+  command?: string;
+  args?: string[];
+  pinnedPort?: boolean;
+}
+
+type Status = import("./src/types.js").Status;
+/** Un projet enrichi de son état courant, tel qu'envoyé au client. */
+type ProjectState = import("./src/types.js").ProjectState;
+
+/** Une entrée de `running` : un process vivant que le dashboard suit. */
+interface RunningEntry {
+  pid: number;
+  startedAt: number;
+  script: string | null;
+  /** `null` pour un process réadopté : ses pipes sont perdus. */
+  proc: ChildProcess | null;
+  adopted: boolean;
+  port: number | null;
+}
+
+/** Ce que `logs/running.json` conserve entre deux démarrages. */
+interface PersistedEntry {
+  pid: number;
+  startedAt: number;
+  script: string | null;
+  port: number | null;
+}
+
+interface Override {
+  name?: string;
+  port?: number;
+  url?: string;
+  command?: string;
+  args?: string[];
+}
+
+/** Une erreur portant le code HTTP à renvoyer au client. */
+type HttpError = Error & { status?: number };
+
+/** Les types d'Express admettent un paramètre absent ou multiple. */
+function paramId(req: Request): string {
+  const value = req.params.id;
+  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+/** `catch (e)` donne un `unknown` : on le ramène à une Error exploitable. */
+function asError(e: unknown): HttpError {
+  if (e instanceof Error) return e;
+  // `String(objet)` donnerait « [object Object] », inexploitable dans un journal.
+  if (typeof e === "object" && e !== null) {
+    try {
+      return new Error(JSON.stringify(e));
+    } catch {
+      return new Error("[objet non sérialisable]"); // référence circulaire
+    }
+  }
+  return new Error(String(e));
+}
+
+const PORT = Number(process.env.PORT) || 7777;
 const ROOT_DIR = process.env.ROOT_DIR || "../";
-const SCAN_DEPTH = process.env.SCAN_DEPTH || 2;
+const SCAN_DEPTH = Number(process.env.SCAN_DEPTH) || 2;
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "config.json");
 
 // La config du launcher ne doit pas fuiter dans les projets qu'il lance :
@@ -27,8 +103,8 @@ const LAUNCHER_ENV_KEYS = new Set([
   "CONFIG_PATH",
 ]);
 
-function childEnv() {
-  const env = { ...process.env };
+function childEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of LAUNCHER_ENV_KEYS) delete env[key];
   return env;
 }
@@ -41,9 +117,9 @@ const MAX_ATTEMPTS = 8;                        // avant blocage temporaire
 const LOCKOUT_MS = 5 * 60 * 1000;
 
 /** @type {Map<string, number>} token de session -> date d'expiration */
-const sessions = new Map();
+const sessions = new Map<string, number>();
 /** @type {Map<string, { count: number, lockedUntil: number }>} ip -> tentatives ratées */
-const attempts = new Map();
+const attempts = new Map<string, { count: number; lockedUntil: number }>();
 
 // Chemins accessibles sans être authentifié (page de login et son habillage).
 const OPEN_PATHS = new Set(["/login", "/style.css", "/favicon.ico"]);
@@ -57,13 +133,13 @@ app.use(express.urlencoded({ extended: false }));
 
 // Comparaison à temps constant : on hashe d'abord pour travailler sur deux
 // buffers de même longueur, timingSafeEqual refusant des tailles différentes.
-function passwordMatches(candidate) {
+function passwordMatches(candidate: string): boolean {
   const a = crypto.createHash("sha256").update(String(candidate)).digest();
   const b = crypto.createHash("sha256").update(PASSWORD).digest();
   return crypto.timingSafeEqual(a, b);
 }
 
-function readCookie(req, name) {
+function readCookie(req: Request, name: string): string | null {
   const header = req.headers.cookie;
   if (!header) return null;
   for (const part of header.split(";")) {
@@ -74,7 +150,7 @@ function readCookie(req, name) {
   return null;
 }
 
-function currentToken(req) {
+function currentToken(req: Request): string | null {
   const token = readCookie(req, SESSION_COOKIE);
   if (!token) return null;
   const expiresAt = sessions.get(token);
@@ -86,7 +162,7 @@ function currentToken(req) {
   return token;
 }
 
-function openSession(res) {
+function openSession(res: Response): void {
   const token = crypto.randomBytes(32).toString("hex");
   sessions.set(token, Date.now() + SESSION_TTL_MS);
   res.cookie(SESSION_COOKIE, token, {
@@ -97,12 +173,12 @@ function openSession(res) {
   });
 }
 
-app.get("/login", (req, res) => {
+app.get("/login", (req: Request, res: Response) => {
   if (!AUTH_ENABLED || currentToken(req)) return res.redirect("/");
   res.sendFile(path.join(__dirname, "public", "login.html"));
 });
 
-app.post("/login", (req, res) => {
+app.post("/login", (req: Request, res: Response) => {
   if (!AUTH_ENABLED) return res.redirect("/");
 
   const ip = req.ip || "unknown";
@@ -125,19 +201,19 @@ app.post("/login", (req, res) => {
   res.redirect("/");
 });
 
-app.post("/logout", (req, res) => {
+app.post("/logout", (req: Request, res: Response) => {
   const token = currentToken(req);
   if (token) sessions.delete(token);
   res.clearCookie(SESSION_COOKIE, { path: "/" });
   res.redirect("/login");
 });
 
-app.get("/api/session", (req, res) => {
+app.get("/api/session", (_req: Request, res: Response) => {
   res.json({ authEnabled: AUTH_ENABLED });
 });
 
 // Barrière : tout le reste (pages, assets, API) exige une session valide.
-app.use((req, res, next) => {
+app.use((req: Request, res: Response, next: NextFunction) => {
   if (!AUTH_ENABLED || OPEN_PATHS.has(req.path) || currentToken(req)) return next();
   if (req.path.startsWith("/api/")) return res.status(401).json({ error: "Not authenticated" });
   res.redirect("/login");
@@ -145,14 +221,13 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, "public")));
 
-/** @type {Map<string, { proc: import('child_process').ChildProcess, startedAt: number }>} */
-const running = new Map();
+const running = new Map<string, RunningEntry>();
 /** @type {Map<string, string[]>} sortie conservée après l'arrêt, pour pouvoir lire un crash */
-const logsById = new Map();
+const logsById = new Map<string, string[]>();
 /** @type {Map<string, number>} compteur monotone par projet, pour que le client détecte un trou */
-const logSeq = new Map();
+const logSeq = new Map<string, number>();
 /** @type {Map<string, number>} port lu dans la sortie du projet, plus fiable que son .env */
-const detectedPorts = new Map();
+const detectedPorts = new Map<string, number>();
 
 const STATE_PATH = path.join(logger.logDir, "running.json");
 
@@ -170,7 +245,7 @@ const PORT_RELEASE_TIMEOUT_MS = 3000; // attente max de libération du port apr�
 const PREFERRED_SCRIPTS = ["dev", "start", "serve"];
 const IGNORED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".turbo", ".cache"]);
 
-function loadConfig() {
+function loadConfig(): { rootDir: string; scanDepth: number; overrides: Record<string, Override> } {
   const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
   const config = JSON.parse(raw);
   if (!ROOT_DIR) throw new Error("Add \"rootDir\" to config.json (parent directory containing your projects)");
@@ -181,22 +256,22 @@ function loadConfig() {
   };
 }
 
-function makeId(rootDir, projectDir) {
+function makeId(rootDir: string, projectDir: string): string {
   const rel = path.relative(rootDir, projectDir);
   return (rel === "" ? path.basename(projectDir) : rel).split(path.sep).join("__");
 }
 
-function detectDefaultScript(scripts) {
+function detectDefaultScript(scripts: Record<string, string>): string | null {
   return PREFERRED_SCRIPTS.find((name) => scripts[name]) || null;
 }
 
-function detectPort(dir) {
+function detectPort(dir: string): number | null {
   const envPath = path.join(dir, ".env");
   if (fs.existsSync(envPath)) {
     try {
       const content = fs.readFileSync(envPath, "utf-8");
       const m = content.match(/^(?:[ \t]*)PORT[ \t]*=[ \t]*(\d+)/m);
-      if (m) return Number.parseInt(m[1], 10);
+      if (m && m[1]) return Number.parseInt(m[1], 10);
     } catch {
       // fichier illisible, on ignore
     }
@@ -204,10 +279,10 @@ function detectPort(dir) {
   return null;
 }
 
-function discoverProjects(rootDir, maxDepth) {
-  const results = [];
+function discoverProjects(rootDir: string, maxDepth: number): Project[] {
+  const results: Project[] = [];
 
-  function scanDir(dir, depth) {
+  function scanDir(dir: string, depth: number): void {
     const pkgPath = path.join(dir, "package.json");
     if (fs.existsSync(pkgPath)) {
       try {
@@ -246,7 +321,7 @@ function discoverProjects(rootDir, maxDepth) {
   return results;
 }
 
-function applyOverrides(project, overrides) {
+function applyOverrides(project: Project, overrides: Record<string, Override>): Project {
   const o = overrides[project.id];
   if (!o) return project;
   const merged = { ...project, ...o };
@@ -256,7 +331,7 @@ function applyOverrides(project, overrides) {
   return merged;
 }
 
-function detectPortFromOutput(id, text) {
+function detectPortFromOutput(id: string, text: string): void {
   if (detectedPorts.has(id)) return; // on garde la première adresse annoncée
   const match = text.replace(ANSI_RE, "").match(URL_RE);
   if (!match) return;
@@ -265,7 +340,7 @@ function detectPortFromOutput(id, text) {
   pushState();
 }
 
-function pushLog(id, line) {
+function pushLog(id: string, line: string): void {
   let lines = logsById.get(id);
   if (!lines) {
     lines = [];
@@ -279,8 +354,8 @@ function pushLog(id, line) {
   broadcast("log", { id, seq, chunk: line });
 }
 
-function checkPort(port) {
-  return new Promise((resolve) => {
+function checkPort(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(400);
     socket
@@ -301,7 +376,7 @@ function checkPort(port) {
 
 // Un seul calcul d'état pour tous les clients, poussé via SSE : les navigateurs
 // n'interrogent plus le serveur en boucle.
-function listProjects() {
+function listProjects(): Project[] {
   const config = loadConfig();
   if (!fs.existsSync(ROOT_DIR)) {
     throw new Error(`Directory not found: ${ROOT_DIR}. Fix "ROOT_DIR" in .env.`);
@@ -309,23 +384,23 @@ function listProjects() {
   return discoverProjects(ROOT_DIR, SCAN_DEPTH).map((p) => applyOverrides(p, config.overrides));
 }
 
-function resolveProject(id) {
+function resolveProject(id: string): Project | null {
   return listProjects().find((p) => p.id === id) || null;
 }
 
 // « starting » = lancé par le dashboard, mais rien ne répond encore sur son port.
 // C'est ce qui permet de n'activer « Open » qu'une fois le service joignable.
-async function computeState() {
+async function computeState(): Promise<ProjectState[]> {
   const discovered = listProjects();
   return Promise.all(
-    discovered.map(async (p) => {
+    discovered.map(async (p): Promise<ProjectState> => {
       const entry = running.get(p.id);
       const detected = p.pinnedPort ? null : detectedPorts.get(p.id);
       const port = detected || p.port || null;
       const url = detected ? `http://localhost:${detected}` : p.url || null;
 
       const portOpen = port ? await checkPort(port) : null;
-      let status;
+      let status: Status;
       if (entry) {
         status = !port || portOpen ? "running" : "starting";
       } else {
@@ -347,16 +422,16 @@ async function computeState() {
 /* ----------------------------------------------------------------- SSE --- */
 
 /** @type {Set<import('express').Response>} */
-const sseClients = new Set();
-let stateTimer = null;
+const sseClients = new Set<Response>();
+let stateTimer: NodeJS.Timeout | null = null;
 let lastStateJson = "";
 let lastFailure = "";
 
-function send(res, event, data) {
+function send(res: Response, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-function broadcast(event, data) {
+function broadcast(event: string, data: unknown): void {
   for (const res of sseClients) send(res, event, data);
 }
 
@@ -368,11 +443,12 @@ async function pushState() {
   } catch (e) {
     // La boucle tourne toutes les 2 s : on ne journalise qu'au changement
     // d'erreur, sinon une mauvaise config remplirait error.log.
-    if (e.message !== lastFailure) {
-      lastFailure = e.message;
-      logger.error("Calcul de l'état impossible", e);
+    const error = asError(e);
+    if (error.message !== lastFailure) {
+      lastFailure = error.message;
+      logger.error("Calcul de l'état impossible", error);
     }
-    broadcast("failure", { error: e.message });
+    broadcast("failure", { error: error.message });
     return;
   }
   lastFailure = "";
@@ -387,13 +463,13 @@ function startStateLoop() {
 }
 
 // Personne ne regarde : on arrête de scanner le disque.
-function stopStateLoop() {
-  clearInterval(stateTimer);
+function stopStateLoop(): void {
+  if (stateTimer) clearInterval(stateTimer);
   stateTimer = null;
   lastStateJson = "";
 }
 
-app.get("/api/events", async (req, res) => {
+app.get("/api/events", async (req: Request, res: Response) => {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -408,7 +484,7 @@ app.get("/api/events", async (req, res) => {
     lastStateJson = JSON.stringify(state);
     send(res, "projects", state);
   } catch (e) {
-    send(res, "failure", { error: e.message });
+    send(res, "failure", { error: asError(e).message });
   }
 
   // Une connexion sans trafic peut être coupée en chemin.
@@ -426,8 +502,8 @@ app.get("/api/events", async (req, res) => {
 // Les enfants sont lancés en detached : ils survivent à l'arrêt du launcher.
 // Sans registre on les retrouve en « external », donc impossibles à arrêter
 // depuis l'interface. On note donc qui tourne, pour se réattacher au démarrage.
-function persistRunning() {
-  const snapshot = {};
+function persistRunning(): void {
+  const snapshot: Record<string, PersistedEntry> = {};
   for (const [id, entry] of running) {
     snapshot[id] = {
       pid: entry.pid,
@@ -439,11 +515,11 @@ function persistRunning() {
   try {
     fs.writeFileSync(STATE_PATH, JSON.stringify(snapshot, null, 2));
   } catch (e) {
-    logger.warn(`Registre des process non écrit : ${e.message}`);
+    logger.warn(`Registre des process non écrit : ${asError(e).message}`);
   }
 }
 
-function isAlive(pid) {
+function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0); // ne tue rien, teste juste l'existence
     return true;
@@ -460,7 +536,7 @@ async function recoverOrphans() {
     return; // pas de registre, ou illisible : rien à reprendre
   }
 
-  for (const [id, entry] of Object.entries(snapshot)) {
+  for (const [id, entry] of Object.entries(snapshot) as [string, PersistedEntry][]) {
     if (!entry.pid || !isAlive(entry.pid)) continue;
     // Un PID peut avoir été réattribué depuis. Si on connaissait son port,
     // on exige qu'il réponde toujours avant de revendiquer le process.
@@ -486,7 +562,7 @@ async function recoverOrphans() {
 
 // Attente active courte après un lancement, pour basculer « starting » ->
 // « running » dès que le port répond plutôt qu'au prochain tour de boucle.
-async function watchUntilReady(project) {
+async function watchUntilReady(project: Project): Promise<void> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (running.has(project.id) && Date.now() < deadline) {
     const port = detectedPorts.get(project.id) || project.port;
@@ -496,7 +572,7 @@ async function watchUntilReady(project) {
 }
 
 // Identification best-effort de ce qui occupe un port, pour un message utile.
-function portHolder(port) {
+function portHolder(port: number): { pid: number; command: string } | null {
   try {
     const out = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], {
       encoding: "utf-8",
@@ -508,19 +584,22 @@ function portHolder(port) {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    return { pid: Number(pid), command: command.split("/").pop() };
+    return { pid: Number(pid), command: command.split("/").pop() || command };
   } catch {
     return null; // lsof absent (Windows) ou port libéré entre-temps
   }
 }
 
-async function spawnProject(project, script) {
-  let command = project.command;
-  let args = project.args;
-  let chosen = null;
+async function spawnProject(project: Project, script?: string): Promise<ChildProcess> {
+  let command: string;
+  let args: string[];
+  let chosen: string | null = null;
 
   // Une override peut fournir une commande custom (ex. non-npm).
-  if (!command) {
+  if (project.command) {
+    command = project.command;
+    args = project.args ?? [];
+  } else {
     chosen = script || project.defaultScript;
     if (!chosen) {
       logger.warn("Aucun script npm exploitable", { id: project.id });
@@ -561,6 +640,10 @@ async function spawnProject(project, script) {
     detached: process.platform !== "win32",
   });
 
+  if (child.pid === undefined) {
+    throw Object.assign(new Error(`Could not spawn ${command}`), { status: 500 });
+  }
+
   running.set(project.id, {
     pid: child.pid,
     startedAt: Date.now(),
@@ -574,13 +657,13 @@ async function spawnProject(project, script) {
   persistRunning();
   pushLog(project.id, `$ ${command} ${args.join(" ")}\n`);
 
-  const onOutput = (d) => {
+  const onOutput = (d: Buffer) => {
     const text = d.toString();
     detectPortFromOutput(project.id, text);
     pushLog(project.id, text);
   };
-  child.stdout.on("data", onOutput);
-  child.stderr.on("data", onOutput);
+  child.stdout?.on("data", onOutput);
+  child.stderr?.on("data", onOutput);
 
   // code vaut null quand le process est tué par un signal (cas d'un stop).
   child.on("exit", (code, signal) => {
@@ -588,8 +671,9 @@ async function spawnProject(project, script) {
     pushLog(project.id, `--- processus terminé (${cause}) ---\n`);
     if (code) {
       const tail = (logsById.get(project.id) || []).slice(-15).join("").trim();
+      const excerpt = tail ? `\n${tail}` : "";
       logger.error(
-        `Projet « ${project.id} » terminé en erreur (code ${code})${tail ? `\n${tail}` : ""}`,
+        `Projet « ${project.id} » terminé en erreur (code ${code})${excerpt}`,
         { command: `${command} ${args.join(" ")}`, cwd: project.cwd }
       );
     }
@@ -613,7 +697,7 @@ async function spawnProject(project, script) {
 // La socket n'appartient pas toujours au process qu'on attend : `npm run dev`
 // sort avant son propre enfant, qui tient encore le port quelques millisecondes.
 // Sans cette attente, un redémarrage se voit refuser son propre port.
-async function waitPortRelease(port) {
+async function waitPortRelease(port: number): Promise<boolean> {
   const deadline = Date.now() + PORT_RELEASE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!(await checkPort(port))) return true;
@@ -624,20 +708,20 @@ async function waitPortRelease(port) {
 
 // Résout quand le process a réellement rendu la main, pour pouvoir enchaîner
 // sur un redémarrage sans relancer par-dessus l'ancien.
-function killAndWaitExit(id) {
-  return new Promise((resolve) => {
+function killAndWaitExit(id: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     const entry = running.get(id);
     if (!entry) return resolve(false);
 
     const finish = () => {
       clearTimeout(timer);
-      clearInterval(poll);
+      if (poll) clearInterval(poll);
       running.delete(id);
       persistRunning();
       resolve(true);
     };
 
-    let poll = null;
+    let poll: NodeJS.Timeout | null = null;
     const timer = setTimeout(() => {
       logger.warn("Le process n'a pas rendu la main dans le délai imparti", { id });
       finish();
@@ -655,7 +739,7 @@ function killAndWaitExit(id) {
     try {
       process.kill(-entry.pid, "SIGTERM");
     } catch (e) {
-      logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${e.message}`, { id });
+      logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${asError(e).message}`, { id });
       try {
         process.kill(entry.pid, "SIGTERM");
       } catch {
@@ -666,7 +750,7 @@ function killAndWaitExit(id) {
 }
 
 // Quand cette fonction rend la main, le port du projet est réellement libre.
-async function stopProject(id) {
+async function stopProject(id: string): Promise<boolean> {
   const entry = running.get(id);
   if (!entry) return false;
   const port = detectedPorts.get(id) || entry.port || null;
@@ -681,51 +765,53 @@ async function stopProject(id) {
 
 /* -------------------------------------------------------------- routes --- */
 
-app.get("/api/projects", async (req, res) => {
+app.get("/api/projects", async (_req: Request, res: Response) => {
   try {
     res.json(await computeState());
   } catch (e) {
-    logger.error("Calcul de l'état impossible", e);
-    res.status(500).json({ error: e.message });
+    const error = asError(e);
+    logger.error("Calcul de l'état impossible", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get("/api/projects/:id/logs", (req, res) => {
+app.get("/api/projects/:id/logs", (req: Request, res: Response) => {
   res.json({
-    logs: logsById.get(req.params.id) || [],
-    seq: logSeq.get(req.params.id) || 0,
+    logs: logsById.get(paramId(req)) || [],
+    seq: logSeq.get(paramId(req)) || 0,
   });
 });
 
 // Le bouton « Refresh » : force un envoi même si l'état n'a pas bougé.
-app.post("/api/refresh", async (req, res) => {
+app.post("/api/refresh", async (_req: Request, res: Response) => {
   lastStateJson = "";
   await pushState();
   res.json({ ok: true });
 });
 
-app.post("/api/projects/:id/start", async (req, res) => {
+app.post("/api/projects/:id/start", async (req: Request, res: Response) => {
   try {
-    if (running.has(req.params.id)) return res.status(409).json({ error: "Already running" });
-    const project = resolveProject(req.params.id);
+    if (running.has(paramId(req))) return res.status(409).json({ error: "Already running" });
+    const project = resolveProject(paramId(req));
     if (!project) {
-      logger.warn("Démarrage demandé pour un projet inconnu", { id: req.params.id });
+      logger.warn("Démarrage demandé pour un projet inconnu", { id: paramId(req) });
       return res.status(404).json({ error: "Project not found (please rescan)" });
     }
     const child = await spawnProject(project, req.body.script);
     await pushState();
     res.json({ ok: true, pid: child.pid });
   } catch (e) {
-    if (!e.status) logger.error("Démarrage impossible", e);
-    res.status(e.status || 500).json({ error: e.message });
+    const error = asError(e);
+    if (!error.status) logger.error("Démarrage impossible", error);
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
-app.post("/api/projects/:id/restart", async (req, res) => {
+app.post("/api/projects/:id/restart", async (req: Request, res: Response) => {
   try {
-    const project = resolveProject(req.params.id);
+    const project = resolveProject(paramId(req));
     if (!project) {
-      logger.warn("Redémarrage demandé pour un projet inconnu", { id: req.params.id });
+      logger.warn("Redémarrage demandé pour un projet inconnu", { id: paramId(req) });
       return res.status(404).json({ error: "Project not found (please rescan)" });
     }
     // On relit le script en cours avant d'arrêter, pour repartir à l'identique.
@@ -737,13 +823,14 @@ app.post("/api/projects/:id/restart", async (req, res) => {
     await pushState();
     res.json({ ok: true, pid: child.pid });
   } catch (e) {
-    if (!e.status) logger.error("Redémarrage impossible", e);
-    res.status(e.status || 500).json({ error: e.message });
+    const error = asError(e);
+    if (!error.status) logger.error("Redémarrage impossible", error);
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
-app.post("/api/projects/:id/stop", async (req, res) => {
-  const stopped = await stopProject(req.params.id);
+app.post("/api/projects/:id/stop", async (req: Request, res: Response) => {
+  const stopped = await stopProject(paramId(req));
   if (stopped) {
     await pushState();
     return res.json({ ok: true });
@@ -756,9 +843,9 @@ app.post("/api/projects/:id/stop", async (req, res) => {
   if (req.body.force) {
     let project;
     try {
-      project = resolveProject(req.params.id);
+      project = resolveProject(paramId(req));
     } catch (e) {
-      return res.status(500).json({ error: e.message });
+      return res.status(500).json({ error: asError(e).message });
     }
     const port = project && (detectedPorts.get(project.id) || project.port);
     if (!port) return res.status(400).json({ error: "No known port for this project" });
@@ -777,12 +864,13 @@ app.post("/api/projects/:id/stop", async (req, res) => {
     try {
       process.kill(holder.pid, "SIGTERM");
     } catch (e) {
-      logger.error(`Arrêt forcé impossible sur le port ${port}`, e);
-      return res.status(500).json({ error: `Could not stop PID ${holder.pid}: ${e.message}` });
+      const error = asError(e);
+      logger.error(`Arrêt forcé impossible sur le port ${port}`, error);
+      return res.status(500).json({ error: `Could not stop PID ${holder.pid}: ${error.message}` });
     }
 
     logger.warn(`Arrêt forcé du process occupant le port ${port}`, {
-      id: req.params.id,
+      id: paramId(req),
       pid: holder.pid,
       command: holder.command,
     });
@@ -790,12 +878,12 @@ app.post("/api/projects/:id/stop", async (req, res) => {
     return res.json({ ok: true, killed: holder });
   }
 
-  logger.warn("Arrêt demandé pour un projet non lancé", { id: req.params.id });
+  logger.warn("Arrêt demandé pour un projet non lancé", { id: paramId(req) });
   res.status(404).json({ error: "Not running" });
 });
 
 // Filet de sécurité : toute erreur qui remonte d'une route atterrit ici.
-app.use((err, req, res, _next) => {
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
   logger.error(`Erreur non gérée sur ${req.method} ${req.originalUrl}`, err);
   if (res.headersSent) return;
   res.status(500).json({ error: "Internal server error" });

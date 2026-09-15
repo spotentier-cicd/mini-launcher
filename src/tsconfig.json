@@ -1,0 +1,16 @@
+{
+  // Navigateur : le seul morceau réellement compilé, vers public/app.js.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "erasableSyntaxOnly": false,
+    "noEmit": false,
+    "outDir": "../public",
+    "rootDir": "."
+  },
+  "include": ["**/*.ts"]
+}

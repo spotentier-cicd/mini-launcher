@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { addProject, cleanupAll, makeRoot, startLauncher } from "./helpers.js";
+import type { LogsResponse, ProjectState } from "../src/types.js";
 
 afterEach(cleanupAll);
 
@@ -13,7 +14,7 @@ describe("détection des projets", () => {
     fs.mkdirSync(path.join(root, "sans-package"));
 
     const launcher = await startLauncher({ root });
-    const projects = await launcher.json("/api/projects");
+    const projects = await launcher.json<ProjectState[]>("/api/projects");
 
     expect(projects.map((p) => p.id).sort()).toEqual(["alpha", "beta"]);
   });
@@ -26,7 +27,7 @@ describe("détection des projets", () => {
     }
 
     const launcher = await startLauncher({ root });
-    const projects = await launcher.json("/api/projects");
+    const projects = await launcher.json<ProjectState[]>("/api/projects");
 
     expect(projects.map((p) => p.id)).toEqual(["app"]);
   });
@@ -39,7 +40,7 @@ describe("détection des projets", () => {
     addProject(root, "rien", { scripts: { lint: "x" } });
 
     const launcher = await startLauncher({ root });
-    const byId = Object.fromEntries((await launcher.json("/api/projects")).map((p) => [p.id, p]));
+    const byId = Object.fromEntries((await launcher.json<ProjectState[]>("/api/projects")).map((p) => [p.id, p]));
 
     expect(byId.tous.defaultScript).toBe("dev");
     expect(byId["sans-dev"].defaultScript).toBe("start");
@@ -53,7 +54,7 @@ describe("détection des projets", () => {
     addProject(root, "sans-port");
 
     const launcher = await startLauncher({ root });
-    const byId = Object.fromEntries((await launcher.json("/api/projects")).map((p) => [p.id, p]));
+    const byId = Object.fromEntries((await launcher.json<ProjectState[]>("/api/projects")).map((p) => [p.id, p]));
 
     expect(byId["avec-port"].port).toBe(4501);
     expect(byId["avec-port"].url).toBe("http://localhost:4501");
@@ -67,7 +68,7 @@ describe("détection des projets", () => {
     addProject(root, path.join("a", "b", "trop-profond"));
 
     const launcher = await startLauncher({ root, env: { SCAN_DEPTH: "2" } });
-    const projects = await launcher.json("/api/projects");
+    const projects = await launcher.json<ProjectState[]>("/api/projects");
 
     expect(projects.map((p) => p.id)).toEqual(["groupe__imbrique"]);
   });
@@ -80,7 +81,7 @@ describe("détection des projets", () => {
       root,
       config: { overrides: { brut: { name: "Nom personnalisé", port: 4500 } } },
     });
-    const [project] = await launcher.json("/api/projects");
+    const [project] = await launcher.json<ProjectState[]>("/api/projects");
 
     expect(project.name).toBe("Nom personnalisé");
     expect(project.port).toBe(4500);
@@ -92,7 +93,7 @@ describe("détection des projets", () => {
     const res = await launcher.fetch("/api/projects");
 
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toMatch(/Directory not found/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Directory not found/);
     expect(launcher.errorLog()).toMatch(/Calcul de l'état impossible/);
   });
 });

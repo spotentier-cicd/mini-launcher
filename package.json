@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "description": "Tableau de bord local pour lancer et ouvrir tes petits projets Express/Hono/etc.",
   "type": "commonjs",
-  "main": "server.js",
+  "main": "server.ts",
   "scripts": {
-    "start": "node server.js",
+    "build": "tsc -p src/tsconfig.json",
+    "build:watch": "tsc -p src/tsconfig.json --watch",
+    "start": "npm run build && node server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/tsconfig.json --noEmit && tsc -p tests/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -15,6 +18,12 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.5.1",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.1"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

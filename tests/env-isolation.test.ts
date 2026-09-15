@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { addProject, cleanupAll, freePort, makeRoot, startLauncher, waitFor } from "./helpers.js";
+import type { LogsResponse, ProjectState } from "../src/types.js";
 
 afterEach(cleanupAll);
 
@@ -28,7 +29,7 @@ describe("isolation de l'environnement des projets", () => {
 
     const output = await waitFor(
       async () => {
-        const { logs } = await launcher.json("/api/projects/sonde/logs");
+        const { logs } = await launcher.json<LogsResponse>("/api/projects/sonde/logs");
         const text = logs.join("");
         return text.includes("PROPRE=") ? text : null;
       },
@@ -69,7 +70,7 @@ describe("isolation de l'environnement des projets", () => {
     await launcher.post("/api/projects/sien/start", { script: "dev" });
     const output = await waitFor(
       async () => {
-        const { logs } = await launcher.json("/api/projects/sien/logs");
+        const { logs } = await launcher.json<LogsResponse>("/api/projects/sien/logs");
         const text = logs.join("");
         return text.includes("écoute sur") || text.includes("Error") ? text : null;
       },

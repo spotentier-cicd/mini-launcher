@@ -1,0 +1,5 @@
+{
+  // Serveur : Node efface les types à l'exécution, rien n'est compilé ici.
+  "extends": "./tsconfig.base.json",
+  "include": ["server.ts", "logger.ts"]
+}

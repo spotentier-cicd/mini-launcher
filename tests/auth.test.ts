@@ -82,7 +82,7 @@ describe("barrière d'authentification", () => {
     const launcher = await startLauncher({ root, password: "" });
 
     expect((await launcher.fetch("/api/projects")).status).toBe(200);
-    expect(await launcher.json("/api/session")).toEqual({ authEnabled: false });
+    expect(await launcher.json<{ authEnabled: boolean }>("/api/session")).toEqual({ authEnabled: false });
     expect(launcher.errorLog()).toMatch(/DASHBOARD_PASSWORD is empty/);
   });
 });

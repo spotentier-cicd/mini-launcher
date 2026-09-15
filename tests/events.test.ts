@@ -10,19 +10,35 @@ import {
   startLauncher,
   waitFor,
 } from "./helpers.js";
+import type { FailureEvent, LogEvent, LogsResponse, ProjectState } from "../src/types.js";
+import type { Launcher } from "./helpers.js";
 
 afterEach(cleanupAll);
 
+interface SseEvent {
+  type: string;
+  data: unknown;
+}
+
+interface SseStream {
+  events: SseEvent[];
+  status: number;
+  contentType: string | null;
+  close: () => void;
+  ofType: (type: string) => SseEvent[];
+}
+
 /** Ouvre /api/events et accumule les évènements reçus. */
-async function openEvents(launcher) {
+async function openEvents(launcher: Launcher): Promise<SseStream> {
   const controller = new AbortController();
   const res = await fetch(`${launcher.base}/api/events`, {
     headers: launcher.cookie ? { cookie: launcher.cookie } : {},
     signal: controller.signal,
   });
-  const events = [];
+  const events: SseEvent[] = [];
 
   (async () => {
+    if (!res.body) return;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -50,7 +66,7 @@ async function openEvents(launcher) {
     status: res.status,
     contentType: res.headers.get("content-type"),
     close: () => controller.abort(),
-    ofType: (type) => events.filter((e) => e.type === type),
+    ofType: (type: string) => events.filter((e) => e.type === type),
   };
 }
 
@@ -71,7 +87,7 @@ describe("flux d'évènements", () => {
     expect(stream.contentType).toMatch(/text\/event-stream/);
 
     const first = await waitFor(() => stream.ofType("projects")[0], { label: "premier état" });
-    expect(first.data.map((p) => p.id)).toEqual(["alpha"]);
+    expect((first.data as ProjectState[]).map((p) => p.id)).toEqual(["alpha"]);
     stream.close();
   });
 
@@ -98,15 +114,15 @@ describe("flux d'évènements", () => {
     const stream = await openEvents(launcher);
 
     await launcher.post("/api/projects/bavard/start", { script: "dev" });
-    await waitFor(() => stream.ofType("log").some((e) => e.data.chunk.includes("ligne 3")), {
+    await waitFor(() => stream.ofType("log").some((e) => (e.data as LogEvent).chunk.includes("ligne 3")), {
       label: "arrivée des logs",
     });
 
     const logs = stream.ofType("log");
-    const seqs = logs.map((e) => e.data.seq);
+    const seqs = logs.map((e) => (e.data as LogEvent).seq);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     expect(new Set(seqs).size).toBe(seqs.length);
-    expect(logs.every((e) => e.data.id === "bavard")).toBe(true);
+    expect(logs.every((e) => (e.data as LogEvent).id === "bavard")).toBe(true);
     stream.close();
   });
 
@@ -115,7 +131,7 @@ describe("flux d'évènements", () => {
     const stream = await openEvents(launcher);
 
     const failure = await waitFor(() => stream.ofType("failure")[0], { label: "évènement failure" });
-    expect(failure.data.error).toMatch(/Directory not found/);
+    expect((failure.data as FailureEvent).error).toMatch(/Directory not found/);
     stream.close();
   });
 });
@@ -135,13 +151,13 @@ describe("détection du port dans la sortie", () => {
     });
     const launcher = await startLauncher({ root });
 
-    expect((await launcher.project("vite-like")).port).toBeNull();
+    expect((await launcher.project("vite-like"))!.port).toBeNull();
 
     await launcher.post("/api/projects/vite-like/start", { script: "dev" });
     const detected = await waitFor(
       async () => {
         const p = await launcher.project("vite-like");
-        return p.port ? p : null;
+        return p?.port ? p : null;
       },
       { label: "détection du port" }
     );
@@ -164,7 +180,7 @@ describe("reprise après un arrêt brutal du launcher", () => {
     const before = await waitFor(
       async () => {
         const p = await first.project("survivant");
-        return p.status === "running" ? p : null;
+        return p?.status === "running" ? p : null;
       },
       { label: "premier démarrage" }
     );
@@ -185,7 +201,7 @@ describe("reprise après un arrêt brutal du launcher", () => {
     expect(adopted.pid).toBe(before.pid);
     expect(adopted.status).toBe("running");
 
-    const { logs } = await second.json("/api/projects/survivant/logs");
+    const { logs } = await second.json<LogsResponse>("/api/projects/survivant/logs");
     expect(logs.join("")).toMatch(/réattaché au process/);
 
     // Le point de tout l'exercice : on peut l'arrêter depuis l'interface.

@@ -1,0 +1,25 @@
+{
+  // Réglages communs. Chaque répertoire a son propre tsconfig.json qui étend
+  // celui-ci : c'est ce que l'éditeur résout en remontant depuis un fichier.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "nodenext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Node supprime les types à l'exécution sans les compiler : la syntaxe doit
+    // donc rester entièrement effaçable (pas d'enum, pas de namespace).
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+
+    "noEmit": true
+  }
+}

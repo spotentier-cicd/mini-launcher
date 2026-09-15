@@ -1,0 +1,15 @@
+{
+  // Tests : chargés par vitest, donc en modules ES et non en CommonJS.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+
+    // Utile côté serveur (elle y a déjà attrapé un groupe de capture non
+    // vérifié), mais dans des assertions sur des données qu'on vient de
+    // fabriquer elle n'apporte que du bruit.
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["**/*.ts", "../vitest.config.mts"]
+}

@@ -11,23 +11,69 @@ modification touche l'un ou l'autre, rarement les deux au même endroit.
 ## Commandes
 
 ```bash
-npm start          # démarre le dashboard (port depuis .env, 7777 par défaut)
+npm start          # compile le front puis démarre le dashboard (port depuis .env)
+npm run build      # régénère public/app.js depuis src/app.ts
+npm run build:watch
+npm run typecheck  # les trois contextes : serveur, navigateur, tests
 ```
 
-Aucun build, aucun bundler, aucune étape de compilation : `public/` est servi tel quel.
+## TypeScript : deux régimes différents
+
+Le projet est en TypeScript, mais **rien n'est compilé côté serveur**. Node ≥ 22.18
+efface les types à l'exécution : `node server.ts` fonctionne tel quel, sans build ni
+`tsx`. D'où `"engines": { "node": ">=22.18" }`.
+
+Conséquence à ne pas oublier : **Node n'effectue aucune vérification**. `npm run typecheck`
+est la seule chose qui valide les types, et le CI le lance.
+
+Le seul morceau réellement compilé est le front : un navigateur ne lit pas de TypeScript.
+`src/app.ts` → `public/app.js` via `npm run build`. Le fichier généré est dans
+`.gitignore` ; ne jamais l'éditer à la main. La balise est `<script type="module">`,
+parce que `tsc` émet un module ES.
+
+Un `tsconfig.json` **par répertoire**, tous étendant `tsconfig.base.json`, car les trois
+contextes n'ont ni le même module ni les mêmes `lib` :
+
+| Fichier | Couvre | Particularité |
+| --- | --- | --- |
+| `tsconfig.json` | `server.ts`, `logger.ts` | CommonJS, `noEmit` |
+| `src/tsconfig.json` | `src/` | ES2022 + DOM, **seul à émettre** |
+| `tests/tsconfig.json` | `tests/` | modules ES, `noUncheckedIndexedAccess` relâché |
+
+Cette disposition n'est pas cosmétique : un éditeur résout la configuration en remontant
+depuis le fichier ouvert. Un `tsconfig.json` racine qui ne couvrirait pas `src/` et
+`tests/` les laisserait retomber sur les réglages par défaut — donc **sans le mode
+strict** dans l'IDE, alors que `npm run typecheck` le passe. `tsconfig.base.json` ne se
+cible jamais directement : il ne contient que des options.
+
+`erasableSyntaxOnly` est actif : l'effacement de types de Node ne sait pas transformer du
+code. **Pas d'`enum`, pas de `namespace`, pas de propriétés de constructeur.**
+
+Le serveur étant en CommonJS, on ne peut pas y écrire d'`import` — une instruction
+`import` ferait basculer Node en ESM. Le motif est donc :
+
+```ts
+const express = require("express") as typeof import("express");
+type Request = import("express").Request;
+```
+
+`src/types.d.ts` porte le contrat partagé entre serveur et navigateur (`ProjectState`,
+`LogEvent`…). Un `.d.ts` n'émet aucun JavaScript, donc rien ne traîne dans `public/`.
+C'est là qu'on ajoute un champ quand la charge utile SSE change — les deux côtés cassent
+alors ensemble, ce qui est tout l'intérêt.
 
 ```bash
 npm test                              # toute la suite (vitest)
-npx vitest run tests/auth.test.js     # un seul fichier
+npx vitest run tests/auth.test.ts     # un seul fichier
 npx vitest run -t "réadopte"          # un seul test, par son nom
 npm run test:watch                    # mode veille
 ```
 
-Les tests sont **d'intégration** : chacun démarre un vrai `server.js` en process enfant,
+Les tests sont **d'intégration** : chacun démarre un vrai `server.ts` en process enfant,
 sur un port libre, avec un `ROOT_DIR` temporaire rempli de faux projets. Rien n'est moqué,
 donc ils couvrent ce qui casse réellement ici — spawn, ports, sessions, flux SSE.
 
-`tests/helpers.js` porte tout le harnais : `startLauncher()` (démarre et attend l'écoute),
+`tests/helpers.ts` porte tout le harnais : `startLauncher()` (démarre et attend l'écoute),
 `addProject()` (fabrique un faux projet), `waitFor()` (attente sur condition, jamais de
 `sleep`), `cleanupAll()`.
 
@@ -39,7 +85,8 @@ Deux points à respecter en ajoutant un test :
   (`fileParallelism: false`) mais les ports restent alloués dynamiquement.
 
 Le harnais impose deux surcharges au serveur, `LOG_DIR` et `CONFIG_PATH`, pour qu'aucun
-test n'écrive dans `logs/` ni ne lise le `config.json` du dépôt.
+test n'écrive dans `logs/` ni ne lise le `config.json` du dépôt. Il lance directement
+`server.ts`, sans build.
 
 Pour une capture d'écran en headless : utiliser `--timeout=2500`, **pas**
 `--virtual-time-budget`. Le flux SSE reste ouvert en permanence, donc le temps virtuel
@@ -58,7 +105,7 @@ déterministe ici ; plusieurs faux négatifs ont déjà été imputés à tort a
 `loadConfig()` lit `config.json`, **mais n'en tire que `overrides`**. `rootDir` et
 `scanDepth` viennent de `.env` (`ROOT_DIR`, `SCAN_DEPTH`) malgré ce que suggère le nom de
 la fonction et d'anciennes versions du README. Les variables sont déclarées en tête de
-`server.js`. `.env` est suivi par git — attention à ce qu'on y écrit.
+`server.ts`. `.env` est suivi par git — attention à ce qu'on y écrit.
 
 ## Architecture
 
@@ -84,7 +131,7 @@ serveur ne lit pas le disque.
 Les fusionner réintroduit un bug déjà corrigé (les logs disparaissaient au moment précis
 où on voulait les lire).
 
-Une entrée de `running` vaut `{ pid, startedAt, script, proc, adopted }`. **`proc` est
+Une entrée de `running` vaut `{ pid, startedAt, script, proc, adopted, port }`. **`proc` est
 `null` pour un process réattaché** au démarrage : ne jamais écrire `entry.proc.pid`, mais
 `entry.pid`. Tout code qui écoute `entry.proc.once("exit")` doit prévoir le cas `adopted`
 (`stopProject()` surveille alors le PID par sondage).
@@ -151,7 +198,7 @@ le démarrage est refusé en 409 avec le process coupable identifié via `lsof`.
 
 ### L'ordre des middlewares d'authentification est critique
 
-La barrière est un `app.use()` au milieu de `server.js`. Tout ce qui est enregistré
+La barrière est un `app.use()` au milieu de `server.ts`. Tout ce qui est enregistré
 **avant** est public (`/login`, `/logout`, `/api/session`) ; tout ce qui vient **après**
 exige une session — y compris `express.static`. Une nouvelle route placée trop haut
 devient publique par accident.
@@ -163,13 +210,16 @@ désactive entièrement l'authentification.
 ### Front : vanilla, contrat par sélecteurs
 
 Pas de framework. `renderRow()` clone `#row-template` et remplit par classes. Ces
-sélecteurs forment un **contrat entre `index.html` et `app.js`** ; en renommer un dans le
+sélecteurs forment un **contrat entre `index.html` et `src/app.ts`** ; en renommer un dans le
 markup casse le rendu silencieusement :
 
 ```
 .row-name  .row-path  .row-port  .open  .script-select
 .start  .start-label  .icon-start  .icon-restart  .stop  .logs-toggle  .logs
 ```
+
+Ce contrat passe désormais par `pick()`, qui lève avec le sélecteur fautif au lieu de
+laisser le rendu échouer en silence.
 
 Le board est intégralement re-rendu à chaque évènement `projects`. C'est acceptable parce
 que ces évènements n'arrivent que sur changement réel.
@@ -179,12 +229,12 @@ et le libellé selon l'état.
 
 ### Journalisation
 
-`logger.js` (winston) : `logs/error.log` reçoit `warn` et au-dessus, la console reçoit
+`logger.ts` (winston) : `logs/error.log` reçoit `warn` et au-dessus, la console reçoit
 `info` et au-dessus. Le fonctionnement normal n'encombre donc pas le fichier.
 
 Les `exceptionHandlers` natifs de winston **ne sont volontairement pas utilisés** : ils
 écrivent leur propre dump JSON en ignorant le format configuré. Des handlers
-`process.on("uncaughtException" / "unhandledRejection")` les remplacent dans `logger.js`.
+`process.on("uncaughtException" / "unhandledRejection")` les remplacent dans `logger.ts`.
 
 ## Pièges rencontrés
 

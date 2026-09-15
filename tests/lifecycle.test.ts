@@ -10,6 +10,7 @@ import {
   startLauncher,
   waitFor,
 } from "./helpers.js";
+import type { LogsResponse, ProjectState } from "../src/types.js";
 
 afterEach(cleanupAll);
 
@@ -22,12 +23,12 @@ describe("démarrage et arrêt", () => {
 
     const start = await launcher.post("/api/projects/svc/start", { script: "dev" });
     expect(start.status).toBe(200);
-    expect((await start.json()).pid).toBeGreaterThan(0);
+    expect(((await start.json()) as { pid: number }).pid).toBeGreaterThan(0);
 
     const running = await waitFor(
       async () => {
         const p = await launcher.project("svc");
-        return p.status === "running" ? p : null;
+        return p?.status === "running" ? p : null;
       },
       { label: "passage en running" }
     );
@@ -36,7 +37,7 @@ describe("démarrage et arrêt", () => {
     expect((await launcher.post("/api/projects/svc/stop")).status).toBe(200);
     // Contrat de /stop : au retour, le port est réellement libéré.
     expect(await portOpen(port)).toBe(false);
-    expect((await launcher.project("svc")).status).toBe("stopped");
+    expect((await launcher.project("svc"))!.status).toBe("stopped");
   });
 
   it("refuse de démarrer deux fois le même projet", async () => {
@@ -49,7 +50,7 @@ describe("démarrage et arrêt", () => {
     const second = await launcher.post("/api/projects/svc/start", { script: "dev" });
 
     expect(second.status).toBe(409);
-    expect((await second.json()).error).toMatch(/Already running/);
+    expect(((await second.json()) as { error: string }).error).toMatch(/Already running/);
   });
 
   it("garde les logs consultables après la mort du process", async () => {
@@ -60,11 +61,11 @@ describe("démarrage et arrêt", () => {
     const launcher = await startLauncher({ root });
 
     await launcher.post("/api/projects/boom/start", { script: "dev" });
-    await waitFor(async () => (await launcher.project("boom")).status === "stopped", {
+    await waitFor(async () => (await launcher.project("boom"))?.status === "stopped", {
       label: "sortie du process",
     });
 
-    const { logs } = await launcher.json("/api/projects/boom/logs");
+    const { logs } = await launcher.json<LogsResponse>("/api/projects/boom/logs");
     expect(logs.join("")).toMatch(/raison du plantage/);
     expect(logs.join("")).toMatch(/processus terminé \(code 1\)/);
   });
@@ -100,8 +101,8 @@ describe("démarrage et arrêt", () => {
 
     const res = await launcher.post("/api/projects/svc/start", { script: "dev" });
     expect(res.status).toBe(409);
-    expect((await res.json()).error).toMatch(/Port \d+ is already in use/);
-    expect((await launcher.project("svc")).pid).toBeNull();
+    expect(((await res.json()) as { error: string }).error).toMatch(/Port \d+ is already in use/);
+    expect((await launcher.project("svc"))!.pid).toBeNull();
 
     await killPort(port);
   });
@@ -124,13 +125,13 @@ describe("redémarrage", () => {
     const launcher = await startLauncher({ root });
 
     await launcher.post("/api/projects/lent/start", { script: "dev" });
-    await waitFor(async () => (await launcher.project("lent")).status === "running", {
+    await waitFor(async () => (await launcher.project("lent"))?.status === "running", {
       label: "démarrage",
     });
 
     const res = await launcher.post("/api/projects/lent/restart", {});
     expect(res.status).toBe(200);
-    await waitFor(async () => (await launcher.project("lent")).status === "running", {
+    await waitFor(async () => (await launcher.project("lent"))?.status === "running", {
       label: "retour en running",
     });
   });
@@ -142,7 +143,7 @@ describe("redémarrage", () => {
     const launcher = await startLauncher({ root });
 
     await launcher.post("/api/projects/svc/start", { script: "dev" });
-    await waitFor(async () => (await launcher.project("svc")).status === "running");
+    await waitFor(async () => (await launcher.project("svc"))?.status === "running");
 
     for (let i = 0; i < 3; i++) {
       const res = await launcher.post("/api/projects/svc/restart", {});
@@ -163,16 +164,16 @@ describe("redémarrage", () => {
     await launcher.post("/api/projects/svc/start", { script: "dev" });
     const before = await waitFor(async () => {
       const p = await launcher.project("svc");
-      return p.status === "running" ? p : null;
+      return p?.status === "running" ? p : null;
     });
 
     const res = await launcher.post("/api/projects/svc/restart", {});
     expect(res.status).toBe(200);
-    const after = await res.json();
+    const after = (await res.json()) as { pid: number };
 
     expect(after.pid).not.toBe(before.pid);
     expect(launcher.registry().svc.script).toBe("dev");
-    await waitFor(async () => (await launcher.project("svc")).status === "running", {
+    await waitFor(async () => (await launcher.project("svc"))?.status === "running", {
       label: "retour en running après restart",
     });
   });
@@ -193,7 +194,7 @@ describe("arrêt forcé d'un process non géré", () => {
       detached: true,
     });
     await waitFor(() => portOpen(port), { label: "process externe en écoute" });
-    await waitFor(async () => (await launcher.project("ext")).status === "external", {
+    await waitFor(async () => (await launcher.project("ext"))?.status === "external", {
       label: "statut external",
     });
 
@@ -203,7 +204,7 @@ describe("arrêt forcé d'un process non géré", () => {
 
     const forced = await launcher.post("/api/projects/ext/stop", { force: true });
     expect(forced.status).toBe(200);
-    expect((await forced.json()).killed.pid).toBe(outsider.pid);
+    expect(((await forced.json()) as { killed: { pid: number } }).killed.pid).toBe(outsider.pid);
 
     await waitFor(async () => !(await portOpen(port)), { label: "port libéré" });
     expect(launcher.errorLog()).toMatch(/Arrêt forcé du process occupant le port/);
@@ -221,7 +222,7 @@ describe("arrêt forcé d'un process non géré", () => {
 
     const res = await launcher.post("/api/projects/moi-meme/stop", { force: true });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/dashboard itself/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/dashboard itself/);
 
     // Toujours vivant.
     expect((await launcher.fetch("/api/projects")).status).toBe(200);

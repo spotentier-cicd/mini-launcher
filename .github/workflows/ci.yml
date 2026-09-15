@@ -24,6 +24,14 @@ jobs:
       - name: Installer les dépendances
         run: npm ci
 
+      - name: Vérifier les types
+        run: npm run typecheck
+
+      # Le navigateur ne lit pas de TypeScript : on s'assure que l'émission
+      # de public/app.js fonctionne, pas seulement le typage.
+      - name: Compiler le front
+        run: npm run build
+
       - name: Lancer la suite
         run: npm test
 
