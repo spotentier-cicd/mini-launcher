@@ -165,6 +165,7 @@ const MAX_LOG_LINES = 200;
 const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connecté
 const READY_TIMEOUT_MS = 30000;   // au-delà, on cesse de sonder le port au démarrage
 const STOP_TIMEOUT_MS = 5000;     // au-delà, on considère l'arrêt acquis
+const PORT_RELEASE_TIMEOUT_MS = 3000; // attente max de libération du port après un arrêt
 
 const PREFERRED_SCRIPTS = ["dev", "start", "serve"];
 const IGNORED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".turbo", ".cache"]);
@@ -471,6 +472,7 @@ async function recoverOrphans() {
       script: entry.script,
       proc: null, // les pipes de la session précédente sont perdus
       adopted: true,
+      port: entry.port || null,
     });
     if (entry.port) detectedPorts.set(id, entry.port);
     pushLog(id, `--- réattaché au process ${entry.pid} après redémarrage du launcher ---\n`);
@@ -565,6 +567,7 @@ async function spawnProject(project, script) {
     script: chosen,
     proc: child,
     adopted: false,
+    port: project.port || null,
   });
   logsById.set(project.id, []);   // on repart d'une sortie vierge à chaque lancement
   detectedPorts.delete(project.id); // et d'une détection de port vierge
@@ -607,9 +610,21 @@ async function spawnProject(project, script) {
   return child;
 }
 
+// La socket n'appartient pas toujours au process qu'on attend : `npm run dev`
+// sort avant son propre enfant, qui tient encore le port quelques millisecondes.
+// Sans cette attente, un redémarrage se voit refuser son propre port.
+async function waitPortRelease(port) {
+  const deadline = Date.now() + PORT_RELEASE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!(await checkPort(port))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
 // Résout quand le process a réellement rendu la main, pour pouvoir enchaîner
 // sur un redémarrage sans relancer par-dessus l'ancien.
-function stopProject(id) {
+function killAndWaitExit(id) {
   return new Promise((resolve) => {
     const entry = running.get(id);
     if (!entry) return resolve(false);
@@ -648,6 +663,20 @@ function stopProject(id) {
       }
     }
   });
+}
+
+// Quand cette fonction rend la main, le port du projet est réellement libre.
+async function stopProject(id) {
+  const entry = running.get(id);
+  if (!entry) return false;
+  const port = detectedPorts.get(id) || entry.port || null;
+
+  await killAndWaitExit(id);
+
+  if (port && !(await waitPortRelease(port))) {
+    logger.warn(`Port ${port} toujours occupé après l'arrêt`, { id });
+  }
+  return true;
 }
 
 /* -------------------------------------------------------------- routes --- */

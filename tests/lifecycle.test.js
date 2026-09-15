@@ -34,10 +34,9 @@ describe("démarrage et arrêt", () => {
     expect(running.url).toBe(`http://localhost:${port}`);
 
     expect((await launcher.post("/api/projects/svc/stop")).status).toBe(200);
-    await waitFor(async () => (await launcher.project("svc")).status === "stopped", {
-      label: "retour à stopped",
-    });
+    // Contrat de /stop : au retour, le port est réellement libéré.
     expect(await portOpen(port)).toBe(false);
+    expect((await launcher.project("svc")).status).toBe("stopped");
   });
 
   it("refuse de démarrer deux fois le même projet", async () => {
@@ -109,6 +108,48 @@ describe("démarrage et arrêt", () => {
 });
 
 describe("redémarrage", () => {
+  it("attend la libération du port quand l'enfant traîne à sortir", async () => {
+    const port = await freePort();
+    const root = makeRoot();
+    // L'enfant garde la socket 600 ms après SIGTERM. Vérifie le contrat de
+    // stopProject() : rendre la main seulement une fois le port libéré.
+    // (Sur macOS npm attend déjà son enfant ; sur Linux non, d'où la nécessité.)
+    addProject(root, "lent", {
+      source: `
+        const server = require("node:net").createServer().listen(${port}, () => console.log("up"));
+        process.on("SIGTERM", () => setTimeout(() => { server.close(); process.exit(0); }, 600));
+      `,
+      env: `PORT=${port}\n`,
+    });
+    const launcher = await startLauncher({ root });
+
+    await launcher.post("/api/projects/lent/start", { script: "dev" });
+    await waitFor(async () => (await launcher.project("lent")).status === "running", {
+      label: "démarrage",
+    });
+
+    const res = await launcher.post("/api/projects/lent/restart", {});
+    expect(res.status).toBe(200);
+    await waitFor(async () => (await launcher.project("lent")).status === "running", {
+      label: "retour en running",
+    });
+  });
+
+  it("enchaîne trois redémarrages d'affilée", async () => {
+    const port = await freePort();
+    const root = makeRoot();
+    addProject(root, "svc", { source: listenerSource(port), env: `PORT=${port}\n` });
+    const launcher = await startLauncher({ root });
+
+    await launcher.post("/api/projects/svc/start", { script: "dev" });
+    await waitFor(async () => (await launcher.project("svc")).status === "running");
+
+    for (let i = 0; i < 3; i++) {
+      const res = await launcher.post("/api/projects/svc/restart", {});
+      expect(res.status, `redémarrage ${i + 1}`).toBe(200);
+    }
+  });
+
   it("relance avec un nouveau pid en réutilisant le script en cours", async () => {
     const port = await freePort();
     const root = makeRoot();
