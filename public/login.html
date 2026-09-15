@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#0c0e11" />
+<meta name="robots" content="noindex" />
+<title>Sign in — Control panel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230c0e11'/><path d='M13 10l9 6-9 6Z' fill='%2334d3bd'/></svg>" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body class="login-page">
+  <main class="login">
+    <form class="login-card" method="post" action="/login">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5.14v13.72L19 12 8 5.14Z" />
+        </svg>
+      </span>
+
+      <h1>Control panel</h1>
+      <p class="login-hint">Enter the dashboard password to continue.</p>
+
+      <p class="login-error" id="error" hidden></p>
+
+      <label class="sr-only" for="password">Password</label>
+      <input
+        class="login-input"
+        id="password"
+        name="password"
+        type="password"
+        autocomplete="current-password"
+        placeholder="••••••••"
+        required
+        autofocus
+      />
+
+      <button class="btn start block" type="submit">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+          <rect x="3" y="11" width="18" height="10" rx="2" />
+        </svg>
+        Unlock
+      </button>
+    </form>
+  </main>
+
+  <script>
+    const MESSAGES = {
+      invalid: "Wrong password. Try again.",
+      locked: "Too many attempts. Wait 5 minutes before retrying.",
+    };
+    const reason = new URLSearchParams(location.search).get("error");
+    if (MESSAGES[reason]) {
+      const box = document.getElementById("error");
+      box.textContent = MESSAGES[reason];
+      box.hidden = false;
+    }
+  </script>
+</body>
+</html>

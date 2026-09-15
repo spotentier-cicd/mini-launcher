@@ -1,7 +1,4 @@
 {
-  "rootDir": "../",
-  "scanDepth": 2,
-
   "overrides": {
     "exemple-de-dossier": {
       "name": "Nom affiché personnalisé",

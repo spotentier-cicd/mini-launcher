@@ -5,17 +5,34 @@ const openLogRows = new Set();
 
 async function fetchProjects() {
   const res = await fetch("/api/projects");
-  if (!res.ok) throw new Error("Erreur serveur");
+  if (res.status === 401) {
+    location.href = "/login";
+    throw new Error("Session expired");
+  }
+  if (!res.ok) throw new Error("Server error");
   return res.json();
 }
 
-function statusLabel(status) {
-  switch (status) {
-    case "running": return "en cours";
-    case "external": return "déjà ouvert (hors dashboard)";
-    default: return "arrêté";
+// Le bouton de déconnexion n'a de sens que si un mot de passe est configuré.
+async function revealLogout() {
+  try {
+    const res = await fetch("/api/session");
+    const { authEnabled } = await res.json();
+    if (authEnabled) document.getElementById("logout").hidden = false;
+  } catch {
+    // sans réponse on laisse le bouton masqué
   }
 }
+
+const STATUS_LABEL = {
+  running: "running",
+  external: "external",
+  stopped: "stopped",
+};
+
+const STATUS_HINT = {
+  external: "Already answering on this port, but not started by the dashboard",
+};
 
 function renderRow(project) {
   const node = rowTemplate.content.firstElementChild.cloneNode(true);
@@ -26,9 +43,17 @@ function renderRow(project) {
   node.querySelector(".row-path").textContent = project.cwd;
 
   const portEl = node.querySelector(".row-port");
-  portEl.innerHTML = project.port
-    ? `<b>:${project.port}</b> · ${statusLabel(project.status)}`
-    : statusLabel(project.status);
+  if (project.port) {
+    const chip = document.createElement("span");
+    chip.className = "port-chip";
+    chip.textContent = `:${project.port}`;
+    portEl.appendChild(chip);
+  }
+  const badge = document.createElement("span");
+  badge.className = "status-badge";
+  badge.textContent = STATUS_LABEL[project.status] || project.status;
+  if (STATUS_HINT[project.status]) badge.title = STATUS_HINT[project.status];
+  portEl.appendChild(badge);
 
   const openBtn = node.querySelector(".open");
   if (project.url) {
@@ -64,10 +89,10 @@ function renderRow(project) {
   } else if (project.status === "external") {
     startBtn.disabled = true;
     stopBtn.disabled = true;
-    stopBtn.title = "Lancé en dehors du dashboard, arrête-le depuis son propre terminal";
+    stopBtn.title = "Launched outside the dashboard, stop it from its own terminal";
   } else if (!project.command && scripts.length === 0) {
     startBtn.disabled = true;
-    startBtn.title = "Aucun script npm détecté dans package.json";
+    startBtn.title = "No npm script detected in package.json";
     stopBtn.disabled = true;
   } else {
     startBtn.disabled = false;
@@ -77,8 +102,9 @@ function renderRow(project) {
   startBtn.addEventListener("click", () => act(project.id, "start", { script: scriptSelect.value }));
   stopBtn.addEventListener("click", () => act(project.id, "stop", {}));
   logsBtn.addEventListener("click", () => {
-    logsEl.classList.toggle("hidden");
-    if (logsEl.classList.contains("hidden")) {
+    const open = logsEl.classList.toggle("hidden") === false;
+    logsBtn.setAttribute("aria-expanded", String(open));
+    if (!open) {
       openLogRows.delete(project.id);
     } else {
       openLogRows.add(project.id);
@@ -88,6 +114,7 @@ function renderRow(project) {
 
   if (openLogRows.has(project.id)) {
     logsEl.classList.remove("hidden");
+    logsBtn.setAttribute("aria-expanded", "true");
     refreshLogs(project.id, logsEl);
   }
 
@@ -98,7 +125,7 @@ async function refreshLogs(id, logsEl) {
   try {
     const res = await fetch(`/api/projects/${id}/logs`);
     const data = await res.json();
-    logsEl.textContent = data.logs.join("") || "(pas encore de sortie)";
+    logsEl.textContent = data.logs.join("") || "(no output yet)";
     logsEl.scrollTop = logsEl.scrollHeight;
   } catch {
     // silencieux : on retentera au prochain cycle
@@ -113,9 +140,9 @@ async function act(id, action, body) {
       body: JSON.stringify(body || {}),
     });
     const data = await res.json();
-    if (!res.ok) toast(data.error || "Une erreur est survenue");
+    if (!res.ok) toast(data.error || "An error occurred");
   } catch (e) {
-    toast(e.message + " : Impossible de contacter le dashboard");
+    toast(e.message + " : Error contacting server");
   }
   await load();
 }
@@ -128,22 +155,34 @@ function toast(message) {
   setTimeout(() => el.remove(), 3200);
 }
 
+let lastSnapshot = "";
+
 async function load() {
   try {
     const projects = await fetchProjects();
-    subtitle.textContent = `${projects.length} projet${projects.length > 1 ? "s" : ""} configuré${projects.length > 1 ? "s" : ""}`;
+    const snapshot = JSON.stringify(projects);
+    if (snapshot === lastSnapshot) return; // rien n'a changé : on garde le DOM en place
+    lastSnapshot = snapshot;
+
+    subtitle.textContent = `${projects.length} project${projects.length > 1 ? "s" : ""} configured`;
     board.innerHTML = "";
     if (projects.length === 0) {
-      board.innerHTML = `<p class="empty">Aucun projet dans projects.json. Ajoute-en un pour commencer.</p>`;
+      board.innerHTML = `<p class="empty">No projects found in projects.json. Add one to get started.</p>`;
       return;
     }
     projects.forEach((p) => board.appendChild(renderRow(p)));
   } catch (e) {
-    board.innerHTML = `<p class="empty">Impossible de charger les projets : ${e.message}</p>`;
+    lastSnapshot = "";
+    board.textContent = "";
+    const msg = document.createElement("p");
+    msg.className = "empty";
+    msg.textContent = `Error loading projects: ${e.message}`;
+    board.appendChild(msg);
   }
 }
 
 document.getElementById("refresh").addEventListener("click", load);
 
+revealLogout();
 load();
 setInterval(load, 2500);
