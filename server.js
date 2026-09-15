@@ -695,12 +695,54 @@ app.post("/api/projects/:id/restart", async (req, res) => {
 
 app.post("/api/projects/:id/stop", async (req, res) => {
   const stopped = await stopProject(req.params.id);
-  if (!stopped) {
-    logger.warn("Arrêt demandé pour un projet non lancé", { id: req.params.id });
-    return res.status(404).json({ error: "Not running" });
+  if (stopped) {
+    await pushState();
+    return res.json({ ok: true });
   }
-  await pushState();
-  res.json({ ok: true });
+
+  // Le projet n'est pas dans `running` : soit il ne tourne pas, soit il tourne
+  // sans qu'on l'ait lancé (« external »). Ce second cas arrive dès qu'un
+  // process a été démarré depuis un terminal, ou par un launcher antérieur au
+  // registre. Sur demande explicite, on tue ce qui occupe le port.
+  if (req.body.force) {
+    let project;
+    try {
+      project = resolveProject(req.params.id);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+    const port = project && (detectedPorts.get(project.id) || project.port);
+    if (!port) return res.status(400).json({ error: "No known port for this project" });
+
+    const holder = portHolder(port);
+    if (!holder) return res.status(404).json({ error: `Nothing is listening on port ${port}` });
+
+    // Le launcher est lui-même un projet scanné : sans ce garde-fou, un Stop
+    // forcé sur sa propre ligne tuerait le dashboard.
+    if (holder.pid === process.pid) {
+      return res.status(400).json({ error: "That process is the dashboard itself" });
+    }
+
+    // On ne vise que le process qui écoute, pas son groupe : on n'a pas
+    // démarré cet arbre, autant ne pas emporter ce qu'on ne connaît pas.
+    try {
+      process.kill(holder.pid, "SIGTERM");
+    } catch (e) {
+      logger.error(`Arrêt forcé impossible sur le port ${port}`, e);
+      return res.status(500).json({ error: `Could not stop PID ${holder.pid}: ${e.message}` });
+    }
+
+    logger.warn(`Arrêt forcé du process occupant le port ${port}`, {
+      id: req.params.id,
+      pid: holder.pid,
+      command: holder.command,
+    });
+    await pushState();
+    return res.json({ ok: true, killed: holder });
+  }
+
+  logger.warn("Arrêt demandé pour un projet non lancé", { id: req.params.id });
+  res.status(404).json({ error: "Not running" });
 });
 
 // Filet de sécurité : toute erreur qui remonte d'une route atterrit ici.

@@ -29,6 +29,14 @@ Pour une capture d'écran en headless : utiliser `--timeout=2500`, **pas**
 `--virtual-time-budget`. Le flux SSE reste ouvert en permanence, donc le temps virtuel
 n'avance jamais et Chrome ne rend jamais la main.
 
+`--screenshot` convient pour constater un rendu, mais **pas pour scénariser une
+interaction** : la page ne vit pas de façon fiable jusqu'au bout d'une séquence de clics,
+et `--dump-dom` vide le DOM dès le `load`, avant tout `setTimeout`. Pour tester un
+parcours (ouvrir un modal, confirmer, vérifier la requête), piloter le navigateur par le
+protocole DevTools — Chrome avec `--remote-debugging-port`, puis `Runtime.evaluate` avec
+`awaitPromise` depuis Node, dont le `WebSocket` global suffit. C'est la seule méthode
+déterministe ici ; plusieurs faux négatifs ont déjà été imputés à tort au code applicatif.
+
 ## Configuration : le piège
 
 `loadConfig()` lit `config.json`, **mais n'en tire que `overrides`**. `rootDir` et
@@ -101,6 +109,14 @@ Sans reprise ils réapparaissent en `external`, où Stop est désactivé — l'o
 `detectPortFromOutput()`** : le port sert de garde-fou anti-réutilisation de PID au
 redémarrage, il doit donc être dans le registre. `recoverOrphans()` n'adopte un PID que
 s'il est vivant et, quand un port était connu, qu'il répond toujours.
+
+### Arrêt d'un process non géré
+
+`POST /api/projects/:id/stop` avec `{ force: true }` tue ce qui occupe le port quand le
+projet n'est pas dans `running` (statut `external`). Sans `force`, la route répond 404
+comme avant. Deux garde-fous : seul le PID qui écoute est visé (pas son groupe), et le
+launcher **refuse de tuer son propre PID** — il apparaît lui-même en `external` sur son
+port dès que `ROOT_DIR` le contient, donc sans ce contrôle un clic suffirait à le tuer.
 
 ### Contrôle de port avant lancement
 

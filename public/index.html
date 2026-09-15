@@ -54,6 +54,17 @@
     </noscript>
   </main>
 
+  <dialog class="modal" id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog" class="modal-card">
+      <h2 class="modal-title" id="confirm-title"></h2>
+      <p class="modal-text" id="confirm-text"></p>
+      <div class="modal-actions">
+        <button class="btn ghost" type="submit" value="cancel" autofocus>Cancel</button>
+        <button class="btn danger" type="submit" value="confirm" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+
   <template id="row-template">
     <article class="row" data-id="">
       <div class="row-main">

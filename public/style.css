@@ -172,13 +172,13 @@ body {
   border-color: rgba(52, 211, 189, 0.45);
 }
 
-.btn.stop.danger {
+.btn.danger {
   color: var(--danger);
   background: var(--danger-soft);
   border-color: rgba(244, 112, 74, 0.26);
 }
 
-.btn.stop.danger:hover:not([disabled]) {
+.btn.danger:hover:not([disabled]) {
   background: rgba(244, 112, 74, 0.2);
   border-color: rgba(244, 112, 74, 0.45);
 }
@@ -365,6 +365,13 @@ body {
   color: var(--starting);
 }
 
+/* Arrêt forcé d'un process qu'on n'a pas lancé : contour marqué pour que le
+   geste ne se confonde pas avec un Stop ordinaire. */
+.btn.stop.force {
+  border-style: dashed;
+  border-color: rgba(244, 112, 74, 0.5);
+}
+
 /* Lien neutralisé tant que le service ne répond pas : la place est gardée
    pour que la ligne ne saute pas quand il devient joignable. */
 .btn.disabled {
@@ -535,6 +542,71 @@ body {
 .btn.block {
   justify-content: center;
   padding: 10px 14px;
+}
+
+/* -------------------------------------------------------------- modal --- */
+
+.modal {
+  width: min(400px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.modal::backdrop {
+  background: rgba(6, 8, 10, 0.6);
+  backdrop-filter: blur(3px);
+}
+
+.modal[open] { animation: modal-in 0.18s var(--ease); }
+.modal[open]::backdrop { animation: fade-in 0.18s var(--ease); }
+
+@keyframes modal-in {
+  from { transform: translateY(6px) scale(0.98); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.modal-card {
+  margin: 0;
+  padding: 22px 22px 18px;
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.modal-text {
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.modal-text code {
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--inset);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 /* ------------------------------------------------------- responsive ----- */

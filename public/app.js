@@ -22,6 +22,36 @@ function toLogin() {
   location.href = "/login";
 }
 
+/* ------------------------------------------------------------- modal --- */
+
+const confirmModal = document.getElementById("confirm");
+const confirmTitle = document.getElementById("confirm-title");
+const confirmText = document.getElementById("confirm-text");
+const confirmOk = document.getElementById("confirm-ok");
+
+// <dialog> natif : Échap, piégeage du focus et ::backdrop sont gratuits.
+// Le formulaire en method="dialog" renseigne returnValue avec le bouton cliqué.
+function askConfirm({ title, html, confirmLabel }) {
+  return new Promise((resolve) => {
+    confirmTitle.textContent = title;
+    confirmText.innerHTML = html;
+    confirmOk.textContent = confirmLabel;
+    confirmModal.returnValue = "cancel"; // Échap ne déclenche aucun bouton
+    confirmModal.addEventListener(
+      "close",
+      () => resolve(confirmModal.returnValue === "confirm"),
+      { once: true }
+    );
+    confirmModal.showModal();
+  });
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+}
+
 /* ---------------------------------------------------------------- rendu --- */
 
 // Start et Restart partagent le même emplacement : quand un projet tourne,
@@ -103,7 +133,13 @@ function renderRow(project) {
   if (project.status === "external") {
     actionBtn.disabled = true;
     actionBtn.title = "Launched outside the dashboard";
-    stopBtn.title = "Launched outside the dashboard, stop it from its own terminal";
+    // Non géré par nous, mais on sait quel port est occupé : on peut proposer
+    // de tuer le process qui le tient, après confirmation explicite.
+    stopBtn.disabled = !project.port;
+    stopBtn.classList.toggle("force", Boolean(project.port));
+    stopBtn.title = project.port
+      ? `Not started by the dashboard — force stop whatever listens on port ${project.port}`
+      : "Not started by the dashboard, and no known port to identify it";
   } else if (!live && !project.command && scripts.length === 0) {
     actionBtn.disabled = true;
     actionBtn.title = "No npm script detected in package.json";
@@ -113,9 +149,21 @@ function renderRow(project) {
     actionBtn.disabled = true; // anti double-clic ; le prochain état rétablit le bouton
     act(project.id, live ? "restart" : "start", { script: scriptSelect.value });
   });
-  stopBtn.addEventListener("click", () => {
+  stopBtn.addEventListener("click", async () => {
+    const force = project.status === "external";
+    if (force) {
+      const ok = await askConfirm({
+        title: "Force stop this process?",
+        html:
+          `Port <code>${escapeHtml(project.port)}</code> is held by a process ` +
+          `<strong>${escapeHtml(project.name)}</strong> that this dashboard did not start. ` +
+          `It will be terminated.`,
+        confirmLabel: "Force stop",
+      });
+      if (!ok) return;
+    }
     stopBtn.disabled = true;
-    act(project.id, "stop", {});
+    act(project.id, "stop", force ? { force: true } : {});
   });
 
   logsBtn.addEventListener("click", () => {
@@ -210,7 +258,8 @@ async function act(id, action, body) {
     });
     if (res.status === 401) return toLogin();
     const data = await res.json();
-    if (!res.ok) toast(data.error || "An error occurred");
+    if (!res.ok) return toast(data.error || "An error occurred");
+    if (data.killed) toast(`Stopped ${data.killed.command} (PID ${data.killed.pid})`);
   } catch (e) {
     toast(`${e.message} : Error contacting server`);
   }

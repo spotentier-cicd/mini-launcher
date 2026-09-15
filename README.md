@@ -131,6 +131,19 @@ ouvert. Si le serveur redémarre, le navigateur se reconnecte tout seul.
 vivant et — si le port était connu — qu'il répond encore, avant de revendiquer le process.
 Ce double contrôle limite le risque d'adopter un PID réattribué à autre chose.
 
+**Arrêt forcé d'un `external`.** Un projet peut tourner sans que le dashboard l'ait lancé :
+démarré depuis un terminal, ou par une instance du launcher antérieure au registre. Il
+apparaît alors en `external`. Le bouton **Stop** y reste actif, avec un contour pointillé :
+il demande confirmation, puis tue le process qui occupe le port (identifié via `lsof`).
+
+Seul le process qui écoute est visé, pas son groupe — on n'a pas démarré cet arbre, autant
+ne pas emporter ce qu'on ne connaît pas. Le launcher refuse de se tuer lui-même : il est
+son propre projet scanné dès que `ROOT_DIR` le contient.
+
+Si le projet n'a **aucun port connu**, il apparaît en `stopped` même s'il tourne, et le
+dashboard ne peut rien pour lui : ajoute une override `port` dans `config.json` pour le
+rendre visible.
+
 **Conflit de port.** Avant de lancer un projet, le port attendu est testé. S'il est déjà
 pris, le démarrage est refusé avec un message qui nomme le coupable plutôt que de laisser
 le projet mourir sur `EADDRINUSE` deux secondes plus tard :
