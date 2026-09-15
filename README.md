@@ -32,7 +32,15 @@ Le scan est automatique : tout dossier contenant un `package.json` est détecté
 
 - **Nom** : le champ `name` du `package.json`, sinon le nom du dossier.
 - **Commande** : le script `dev`, sinon `start`, sinon `serve` (dans cet ordre de préférence). S'il y a plusieurs scripts candidats, un menu déroulant apparaît pour choisir lequel lancer.
-- **Port** : lu depuis un fichier `.env` du projet (`PORT=...`). Si absent, le port reste inconnu et le bouton "Ouvrir" est masqué.
+- **Port** : détecté dans trois sources, par ordre de priorité décroissant :
+  1. une override `port` dans `config.json` (elle gagne toujours) ;
+  2. **l'adresse annoncée par le projet dans sa sortie** (`http://localhost:5173`), lue au
+     vol au démarrage, codes couleur compris. C'est la source la plus fiable : c'est le
+     port réellement utilisé, pas celui qui est censé l'être ;
+  3. un `PORT=...` dans le `.env` du projet.
+
+  La plupart des projets n'ayant pas de `.env`, c'est le point 2 qui fait le gros du
+  travail — le bouton **Open** apparaît tout seul quelques secondes après le lancement.
 
 ### Personnaliser un projet détecté (overrides)
 
@@ -116,6 +124,24 @@ le serveur y pousse les changements d'état et chaque ligne de log au fil de l'e
 logs s'affichent sans délai, et le serveur ne scanne le disque que tant qu'au moins un onglet est
 ouvert. Si le serveur redémarre, le navigateur se reconnecte tout seul.
 
+## Reprise et conflits de port
+
+**Reprise après redémarrage.** Le launcher tient un registre des process lancés dans
+`logs/running.json`. Au démarrage il vérifie, pour chaque entrée, que le PID est toujours
+vivant et — si le port était connu — qu'il répond encore, avant de revendiquer le process.
+Ce double contrôle limite le risque d'adopter un PID réattribué à autre chose.
+
+**Conflit de port.** Avant de lancer un projet, le port attendu est testé. S'il est déjà
+pris, le démarrage est refusé avec un message qui nomme le coupable plutôt que de laisser
+le projet mourir sur `EADDRINUSE` deux secondes plus tard :
+
+```
+Port 3000 is already in use by node (PID 42988). Free it before starting.
+```
+
+L'identification du process repose sur `lsof` ; là où il n'existe pas, le conflit est
+signalé sans nommer le coupable.
+
 ## Journal des erreurs
 
 Les problèmes sont écrits dans **`logs/error.log`** (créé automatiquement, ignoré par git),
@@ -150,7 +176,10 @@ ne pas emporter les projets en cours d'exécution.
 
 ## Limites à connaître
 
-- Si tu fermes le process `mini-launcher`, les projets qu'il a lancés s'arrêtent aussi.
+- Les projets lancés par le dashboard **survivent** à son arrêt (ils sont détachés). Au
+  redémarrage, le launcher les reprend en main grâce à `logs/running.json` : ils
+  réapparaissent en `running` et restent arrêtables. Seuls leurs logs de la session
+  précédente sont perdus, ce que le panneau Logs indique explicitement.
 - Prévu pour tourner en local. L'accès est protégé par mot de passe, mais le trafic reste en HTTP
   en clair : derrière un reverse proxy TLS si tu l'exposes hors de ta machine.
 - Tant qu'un onglet est ouvert, le serveur relit les `package.json` toutes les 2 secondes (léger, mais évite un `ROOT_DIR` avec des milliers de sous-dossiers). Aucun onglet ouvert, aucun scan.

@@ -60,6 +60,11 @@ serveur ne lit pas le disque.
 Les fusionner réintroduit un bug déjà corrigé (les logs disparaissaient au moment précis
 où on voulait les lire).
 
+Une entrée de `running` vaut `{ pid, startedAt, script, proc, adopted }`. **`proc` est
+`null` pour un process réattaché** au démarrage : ne jamais écrire `entry.proc.pid`, mais
+`entry.pid`. Tout code qui écoute `entry.proc.once("exit")` doit prévoir le cas `adopted`
+(`stopProject()` surveille alors le PID par sondage).
+
 `pushLog()` est le seul point d'entrée pour ajouter de la sortie : il incrémente `logSeq`
 (compteur monotone par projet) et diffuse le chunk. Le client compare les numéros, détecte
 un trou et se resynchronise via `GET /api/projects/:id/logs`, qui renvoie `{ logs, seq }`.
@@ -76,6 +81,32 @@ Calculés dans `computeState()` en croisant « lancé par nous » et « le port 
 `starting` existe pour que le bouton **Open** ne pointe pas vers un serveur qui n'écoute
 pas encore. `watchUntilReady()` sonde le port toutes les 400 ms pendant 30 s après un
 lancement afin de basculer sans attendre le tour de boucle suivant.
+
+### D'où vient le port
+
+Trois sources, par priorité : override `config.json` (marquée `pinnedPort`, gagne
+toujours) > **`detectedPorts`**, alimentée par `detectPortFromOutput()` qui lit
+`http://localhost:PORT` dans la sortie du projet > le `PORT` du `.env`. La détection
+supprime les codes ANSI avant de chercher, sinon les URL colorées de Vite échappent à la
+regex. La plupart des projets n'ayant pas de `.env`, c'est cette détection qui rend le
+bouton Open utilisable.
+
+### Reprise des orphelins
+
+Les enfants sont lancés `detached`, donc ils **survivent à l'arrêt du launcher** (vérifié).
+Sans reprise ils réapparaissent en `external`, où Stop est désactivé — l'outil oblige alors
+à ouvrir un terminal, ce qu'il est censé éviter.
+
+`persistRunning()` écrit `logs/running.json` à chaque changement, **y compris depuis
+`detectPortFromOutput()`** : le port sert de garde-fou anti-réutilisation de PID au
+redémarrage, il doit donc être dans le registre. `recoverOrphans()` n'adopte un PID que
+s'il est vivant et, quand un port était connu, qu'il répond toujours.
+
+### Contrôle de port avant lancement
+
+`spawnProject()` est `async` uniquement pour ce contrôle : si le port attendu répond déjà,
+le démarrage est refusé en 409 avec le process coupable identifié via `lsof`. Vérifié que
+ça ne casse pas le restart — le socket est libéré dès la sortie du process.
 
 ### L'ordre des middlewares d'authentification est critique
 

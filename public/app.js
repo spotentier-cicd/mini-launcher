@@ -54,6 +54,9 @@ function renderRow(project) {
   badge.className = "status-badge";
   badge.textContent = STATUS_LABEL[project.status] || project.status;
   if (STATUS_HINT[project.status]) badge.title = STATUS_HINT[project.status];
+  if (project.adopted) {
+    badge.title = "Reattached after a launcher restart — logs from the previous session are lost";
+  }
   portEl.appendChild(badge);
 
   const live = project.status === "running" || project.status === "starting";

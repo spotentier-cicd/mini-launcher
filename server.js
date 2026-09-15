@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const net = require("node:net");
 const crypto = require("node:crypto");
+const { execFileSync } = require("node:child_process");
 require('dotenv').config();
 const logger = require("./logger");
 
@@ -130,6 +131,15 @@ const running = new Map();
 const logsById = new Map();
 /** @type {Map<string, number>} compteur monotone par projet, pour que le client détecte un trou */
 const logSeq = new Map();
+/** @type {Map<string, number>} port lu dans la sortie du projet, plus fiable que son .env */
+const detectedPorts = new Map();
+
+const STATE_PATH = path.join(__dirname, "logs", "running.json");
+
+// Vite, Next, Hono… annoncent tous leur adresse au démarrage. La lire évite de
+// dépendre d'un PORT dans le .env du projet, que la plupart n'ont pas.
+const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})/;
+const ANSI_RE = /\u001B\[[0-9;]*[a-zA-Z]/g;
 const MAX_LOG_LINES = 200;
 
 const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connecté
@@ -220,7 +230,18 @@ function applyOverrides(project, overrides) {
   if (!o) return project;
   const merged = { ...project, ...o };
   if (o.port && !o.url) merged.url = `http://localhost:${o.port}`;
+  // Un port posé à la main dans config.json l'emporte sur ce qu'on détecterait.
+  if (o.port || o.url) merged.pinnedPort = true;
   return merged;
+}
+
+function detectPortFromOutput(id, text) {
+  if (detectedPorts.has(id)) return; // on garde la première adresse annoncée
+  const match = text.replace(ANSI_RE, "").match(URL_RE);
+  if (!match) return;
+  detectedPorts.set(id, Number(match[1]));
+  persistRunning(); // le registre doit connaître le port : il sert de garde-fou à la reprise
+  pushState();
 }
 
 function pushLog(id, line) {
@@ -278,18 +299,25 @@ async function computeState() {
   return Promise.all(
     discovered.map(async (p) => {
       const entry = running.get(p.id);
-      const portOpen = p.port ? await checkPort(p.port) : null;
+      const detected = p.pinnedPort ? null : detectedPorts.get(p.id);
+      const port = detected || p.port || null;
+      const url = detected ? `http://localhost:${detected}` : p.url || null;
+
+      const portOpen = port ? await checkPort(port) : null;
       let status;
       if (entry) {
-        status = !p.port || portOpen ? "running" : "starting";
+        status = !port || portOpen ? "running" : "starting";
       } else {
         status = portOpen ? "external" : "stopped";
       }
       return {
         ...p,
+        port,
+        url,
         status,
-        pid: entry ? entry.proc.pid : null,
+        pid: entry ? entry.pid : null,
         startedAt: entry ? entry.startedAt : null,
+        adopted: entry ? Boolean(entry.adopted) : false,
       };
     })
   );
@@ -372,20 +400,99 @@ app.get("/api/events", async (req, res) => {
   });
 });
 
+/* ------------------------------------------------ persistance / reprise --- */
+
+// Les enfants sont lancés en detached : ils survivent à l'arrêt du launcher.
+// Sans registre on les retrouve en « external », donc impossibles à arrêter
+// depuis l'interface. On note donc qui tourne, pour se réattacher au démarrage.
+function persistRunning() {
+  const snapshot = {};
+  for (const [id, entry] of running) {
+    snapshot[id] = {
+      pid: entry.pid,
+      startedAt: entry.startedAt,
+      script: entry.script,
+      port: detectedPorts.get(id) || null,
+    };
+  }
+  try {
+    fs.writeFileSync(STATE_PATH, JSON.stringify(snapshot, null, 2));
+  } catch (e) {
+    logger.warn(`Registre des process non écrit : ${e.message}`);
+  }
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0); // ne tue rien, teste juste l'existence
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function recoverOrphans() {
+  let snapshot;
+  try {
+    snapshot = JSON.parse(fs.readFileSync(STATE_PATH, "utf-8"));
+  } catch {
+    return; // pas de registre, ou illisible : rien à reprendre
+  }
+
+  for (const [id, entry] of Object.entries(snapshot)) {
+    if (!entry.pid || !isAlive(entry.pid)) continue;
+    // Un PID peut avoir été réattribué depuis. Si on connaissait son port,
+    // on exige qu'il réponde toujours avant de revendiquer le process.
+    if (entry.port && !(await checkPort(entry.port))) continue;
+
+    running.set(id, {
+      pid: entry.pid,
+      startedAt: entry.startedAt,
+      script: entry.script,
+      proc: null, // les pipes de la session précédente sont perdus
+      adopted: true,
+    });
+    if (entry.port) detectedPorts.set(id, entry.port);
+    pushLog(id, `--- réattaché au process ${entry.pid} après redémarrage du launcher ---\n`);
+    pushLog(id, "--- les logs de la session précédente sont perdus ---\n");
+    logger.info(`Process réattaché : ${id} (pid ${entry.pid})`);
+  }
+  persistRunning();
+}
+
 /* -------------------------------------------------- cycle de vie projet --- */
 
 // Attente active courte après un lancement, pour basculer « starting » ->
 // « running » dès que le port répond plutôt qu'au prochain tour de boucle.
 async function watchUntilReady(project) {
-  if (!project.port) return;
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (running.has(project.id) && Date.now() < deadline) {
-    if (await checkPort(project.port)) return pushState();
+    const port = detectedPorts.get(project.id) || project.port;
+    if (port && (await checkPort(port))) return pushState();
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
 }
 
-function spawnProject(project, script) {
+// Identification best-effort de ce qui occupe un port, pour un message utile.
+function portHolder(port) {
+  try {
+    const out = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const pid = out.trim().split("\n")[0];
+    if (!pid) return null;
+    const command = execFileSync("ps", ["-p", pid, "-o", "comm="], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return { pid: Number(pid), command: command.split("/").pop() };
+  } catch {
+    return null; // lsof absent (Windows) ou port libéré entre-temps
+  }
+}
+
+async function spawnProject(project, script) {
   let command = project.command;
   let args = project.args;
   let chosen = null;
@@ -409,6 +516,22 @@ function spawnProject(project, script) {
     throw Object.assign(new Error(`Directory not found: ${project.cwd}`), { status: 400 });
   }
 
+  // Le port est-il déjà pris ? Autant le dire tout de suite plutôt que de
+  // laisser le projet mourir sur EADDRINUSE deux secondes plus tard.
+  const expectedPort = project.port || detectedPorts.get(project.id);
+  if (expectedPort && (await checkPort(expectedPort))) {
+    const holder = portHolder(expectedPort);
+    logger.warn(`Port ${expectedPort} déjà occupé`, {
+      id: project.id,
+      ...(holder ? { par: holder.command, pid: holder.pid } : {}),
+    });
+    const by = holder ? ` by ${holder.command} (PID ${holder.pid})` : "";
+    throw Object.assign(
+      new Error(`Port ${expectedPort} is already in use${by}. Free it before starting.`),
+      { status: 409 }
+    );
+  }
+
   const child = spawn(command, args, {
     cwd: project.cwd,
     shell: true,
@@ -416,12 +539,25 @@ function spawnProject(project, script) {
     detached: process.platform !== "win32",
   });
 
-  running.set(project.id, { proc: child, startedAt: Date.now(), script: chosen });
-  logsById.set(project.id, []); // on repart d'une sortie vierge à chaque lancement
+  running.set(project.id, {
+    pid: child.pid,
+    startedAt: Date.now(),
+    script: chosen,
+    proc: child,
+    adopted: false,
+  });
+  logsById.set(project.id, []);   // on repart d'une sortie vierge à chaque lancement
+  detectedPorts.delete(project.id); // et d'une détection de port vierge
+  persistRunning();
   pushLog(project.id, `$ ${command} ${args.join(" ")}\n`);
 
-  child.stdout.on("data", (d) => pushLog(project.id, d.toString()));
-  child.stderr.on("data", (d) => pushLog(project.id, d.toString()));
+  const onOutput = (d) => {
+    const text = d.toString();
+    detectPortFromOutput(project.id, text);
+    pushLog(project.id, text);
+  };
+  child.stdout.on("data", onOutput);
+  child.stderr.on("data", onOutput);
 
   // code vaut null quand le process est tué par un signal (cas d'un stop).
   child.on("exit", (code, signal) => {
@@ -435,6 +571,7 @@ function spawnProject(project, script) {
       );
     }
     running.delete(project.id);
+    persistRunning();
     pushState();
   });
 
@@ -442,6 +579,7 @@ function spawnProject(project, script) {
     pushLog(project.id, `Erreur : ${err.message}\n`);
     logger.error(`Lancement impossible pour ${project.id}`, err);
     running.delete(project.id);
+    persistRunning();
     pushState();
   });
 
@@ -456,21 +594,38 @@ function stopProject(id) {
     const entry = running.get(id);
     if (!entry) return resolve(false);
 
-    let timer;
-    entry.proc.once("exit", () => {
+    const finish = () => {
       clearTimeout(timer);
+      clearInterval(poll);
+      running.delete(id);
+      persistRunning();
       resolve(true);
-    });
-    timer = setTimeout(() => {
+    };
+
+    let poll = null;
+    const timer = setTimeout(() => {
       logger.warn("Le process n'a pas rendu la main dans le délai imparti", { id });
-      resolve(true);
+      finish();
     }, STOP_TIMEOUT_MS);
 
+    if (entry.proc) {
+      entry.proc.once("exit", finish);
+    } else {
+      // Process réattaché : pas d'évènement exit à écouter, on surveille le PID.
+      poll = setInterval(() => {
+        if (!isAlive(entry.pid)) finish();
+      }, 200);
+    }
+
     try {
-      process.kill(-entry.proc.pid, "SIGTERM");
+      process.kill(-entry.pid, "SIGTERM");
     } catch (e) {
       logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${e.message}`, { id });
-      entry.proc.kill("SIGTERM");
+      try {
+        process.kill(entry.pid, "SIGTERM");
+      } catch {
+        finish(); // déjà mort
+      }
     }
   });
 }
@@ -508,7 +663,7 @@ app.post("/api/projects/:id/start", async (req, res) => {
       logger.warn("Démarrage demandé pour un projet inconnu", { id: req.params.id });
       return res.status(404).json({ error: "Project not found (please rescan)" });
     }
-    const child = spawnProject(project, req.body.script);
+    const child = await spawnProject(project, req.body.script);
     await pushState();
     res.json({ ok: true, pid: child.pid });
   } catch (e) {
@@ -529,7 +684,7 @@ app.post("/api/projects/:id/restart", async (req, res) => {
     const script = req.body.script || (entry && entry.script) || undefined;
 
     await stopProject(project.id);
-    const child = spawnProject(project, script);
+    const child = await spawnProject(project, script);
     await pushState();
     res.json({ ok: true, pid: child.pid });
   } catch (e) {
@@ -554,6 +709,8 @@ app.use((err, req, res, _next) => {
   if (res.headersSent) return;
   res.status(500).json({ error: "Internal server error" });
 });
+
+recoverOrphans();
 
 app.listen(PORT, () => {
   logger.info(`Dashboard available at http://localhost:${PORT}`);
