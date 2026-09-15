@@ -27,6 +27,8 @@
   --running-soft: rgba(52, 211, 189, 0.13);
   --external: #f2a765;
   --external-soft: rgba(242, 167, 101, 0.13);
+  --starting: #7aa2f7;
+  --starting-soft: rgba(122, 162, 247, 0.14);
   --stopped: #5d6774;
   --stopped-soft: rgba(93, 103, 116, 0.16);
   --danger: #f4704a;
@@ -44,6 +46,10 @@
 *,
 *::before,
 *::after { box-sizing: border-box; }
+
+/* .btn et .icon posent leur propre display : sans ceci l'attribut hidden,
+   qui vient de la feuille du navigateur, serait ignoré. */
+[hidden] { display: none !important; }
 
 html { background: var(--bg); }
 
@@ -256,14 +262,23 @@ body {
   box-shadow: 0 0 0 3px var(--running-soft), 0 0 12px rgba(52, 211, 189, 0.5);
 }
 
-.row[data-status="running"] .dot::after {
+.row[data-status="starting"] .dot {
+  background: var(--starting);
+  box-shadow: 0 0 0 3px var(--starting-soft);
+}
+
+.row[data-status="running"] .dot::after,
+.row[data-status="starting"] .dot::after {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: var(--running);
+  background: currentColor;
+  color: var(--running);
   animation: ping 2.2s var(--ease) infinite;
 }
+
+.row[data-status="starting"] .dot::after { color: var(--starting); }
 
 .row[data-status="external"] .dot {
   background: var(--external);
@@ -343,6 +358,18 @@ body {
 .row[data-status="external"] .status-badge {
   background: var(--external-soft);
   color: var(--external);
+}
+
+.row[data-status="starting"] .status-badge {
+  background: var(--starting-soft);
+  color: var(--starting);
+}
+
+/* Lien neutralisé tant que le service ne répond pas : la place est gardée
+   pour que la ligne ne saute pas quand il devient joignable. */
+.btn.disabled {
+  opacity: 0.3;
+  pointer-events: none;
 }
 
 /* actions ---------------------------------------------------------------- */

@@ -128,7 +128,13 @@ app.use(express.static(path.join(__dirname, "public")));
 const running = new Map();
 /** @type {Map<string, string[]>} sortie conservée après l'arrêt, pour pouvoir lire un crash */
 const logsById = new Map();
+/** @type {Map<string, number>} compteur monotone par projet, pour que le client détecte un trou */
+const logSeq = new Map();
 const MAX_LOG_LINES = 200;
+
+const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connecté
+const READY_TIMEOUT_MS = 30000;   // au-delà, on cesse de sonder le port au démarrage
+const STOP_TIMEOUT_MS = 5000;     // au-delà, on considère l'arrêt acquis
 
 const PREFERRED_SCRIPTS = ["dev", "start", "serve"];
 const IGNORED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".turbo", ".cache"]);
@@ -225,6 +231,10 @@ function pushLog(id, line) {
   }
   lines.push(line);
   if (lines.length > MAX_LOG_LINES) lines.shift();
+
+  const seq = (logSeq.get(id) || 0) + 1;
+  logSeq.set(id, seq);
+  broadcast("log", { id, seq, chunk: line });
 }
 
 function checkPort(port) {
@@ -245,81 +255,158 @@ function checkPort(port) {
   });
 }
 
-app.get("/api/projects", async (req, res) => {
-  let config;
-  try {
-    config = loadConfig();
-  } catch (e) {
-    logger.error("Configuration illisible", e);
-    return res.status(500).json({ error: e.message });
-  }
+/* -------------------------------------------------------- état partagé --- */
 
+// Un seul calcul d'état pour tous les clients, poussé via SSE : les navigateurs
+// n'interrogent plus le serveur en boucle.
+function listProjects() {
+  const config = loadConfig();
   if (!fs.existsSync(ROOT_DIR)) {
-    logger.error("ROOT_DIR introuvable", { rootDir: ROOT_DIR });
-    return res.status(400).json({ error: `Directory not found: ${ROOT_DIR}. Fix "ROOT_DIR" in .env.` });
+    throw new Error(`Directory not found: ${ROOT_DIR}. Fix "ROOT_DIR" in .env.`);
   }
+  return discoverProjects(ROOT_DIR, SCAN_DEPTH).map((p) => applyOverrides(p, config.overrides));
+}
 
-  const discovered = discoverProjects(ROOT_DIR, SCAN_DEPTH).map((p) =>
-    applyOverrides(p, config.overrides)
-  );
+function resolveProject(id) {
+  return listProjects().find((p) => p.id === id) || null;
+}
 
-  const results = await Promise.all(
+// « starting » = lancé par le dashboard, mais rien ne répond encore sur son port.
+// C'est ce qui permet de n'activer « Open » qu'une fois le service joignable.
+async function computeState() {
+  const discovered = listProjects();
+  return Promise.all(
     discovered.map(async (p) => {
       const entry = running.get(p.id);
-      const managedByUs = !!entry;
       const portOpen = p.port ? await checkPort(p.port) : null;
-      const other = portOpen ? "external" : "stopped";
+      let status;
+      if (entry) {
+        status = !p.port || portOpen ? "running" : "starting";
+      } else {
+        status = portOpen ? "external" : "stopped";
+      }
       return {
         ...p,
-        status: managedByUs ? "running" : other,
+        status,
         pid: entry ? entry.proc.pid : null,
         startedAt: entry ? entry.startedAt : null,
       };
     })
   );
+}
 
-  res.json(results);
-});
+/* ----------------------------------------------------------------- SSE --- */
 
-app.get("/api/projects/:id/logs", (req, res) => {
-  res.json({ logs: logsById.get(req.params.id) || [] });
-});
+/** @type {Set<import('express').Response>} */
+const sseClients = new Set();
+let stateTimer = null;
+let lastStateJson = "";
+let lastFailure = "";
 
-app.post("/api/projects/:id/start", (req, res) => {
-  let config;
+function send(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+function broadcast(event, data) {
+  for (const res of sseClients) send(res, event, data);
+}
+
+async function pushState() {
+  if (sseClients.size === 0) return;
+  let state;
   try {
-    config = loadConfig();
+    state = await computeState();
   } catch (e) {
-    logger.error("Configuration illisible", e);
-    return res.status(500).json({ error: e.message });
+    // La boucle tourne toutes les 2 s : on ne journalise qu'au changement
+    // d'erreur, sinon une mauvaise config remplirait error.log.
+    if (e.message !== lastFailure) {
+      lastFailure = e.message;
+      logger.error("Calcul de l'état impossible", e);
+    }
+    broadcast("failure", { error: e.message });
+    return;
+  }
+  lastFailure = "";
+  const json = JSON.stringify(state);
+  if (json === lastStateJson) return; // rien de neuf : aucun octet envoyé
+  lastStateJson = json;
+  broadcast("projects", state);
+}
+
+function startStateLoop() {
+  if (!stateTimer) stateTimer = setInterval(pushState, STATE_INTERVAL_MS);
+}
+
+// Personne ne regarde : on arrête de scanner le disque.
+function stopStateLoop() {
+  clearInterval(stateTimer);
+  stateTimer = null;
+  lastStateJson = "";
+}
+
+app.get("/api/events", async (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.write("retry: 2000\n\n");
+  sseClients.add(res);
+  startStateLoop();
+
+  try {
+    const state = await computeState();
+    lastStateJson = JSON.stringify(state);
+    send(res, "projects", state);
+  } catch (e) {
+    send(res, "failure", { error: e.message });
   }
 
-  const discovered = discoverProjects(ROOT_DIR, SCAN_DEPTH).map((p) =>
-    applyOverrides(p, config.overrides)
-  );
-  const project = discovered.find((p) => p.id === req.params.id);
-  if (!project) {
-    logger.warn("Démarrage demandé pour un projet inconnu", { id: req.params.id });
-    return res.status(404).json({ error: "Project not found (please rescan)" });
-  }
-  if (running.has(project.id)) return res.status(409).json({ error: "Already running" });
+  // Une connexion sans trafic peut être coupée en chemin.
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 25000);
 
-  // Une override peut fournir une commande custom (ex. non-npm). Sinon on lance le script choisi via npm.
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+    if (sseClients.size === 0) stopStateLoop();
+  });
+});
+
+/* -------------------------------------------------- cycle de vie projet --- */
+
+// Attente active courte après un lancement, pour basculer « starting » ->
+// « running » dès que le port répond plutôt qu'au prochain tour de boucle.
+async function watchUntilReady(project) {
+  if (!project.port) return;
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  while (running.has(project.id) && Date.now() < deadline) {
+    if (await checkPort(project.port)) return pushState();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+}
+
+function spawnProject(project, script) {
   let command = project.command;
   let args = project.args;
+  let chosen = null;
+
+  // Une override peut fournir une commande custom (ex. non-npm).
   if (!command) {
-    const script = req.body.script || project.defaultScript;
-    if (!script) {
+    chosen = script || project.defaultScript;
+    if (!chosen) {
       logger.warn("Aucun script npm exploitable", { id: project.id });
-      return res.status(400).json({ error: "No npm script detected (dev/start/serve). Add an override in config.json." });
+      throw Object.assign(
+        new Error("No npm script detected (dev/start/serve). Add an override in config.json."),
+        { status: 400 }
+      );
     }
     command = "npm";
-    args = ["run", script];
+    args = ["run", chosen];
   }
 
   if (!fs.existsSync(project.cwd)) {
     logger.error("Dossier du projet introuvable", { id: project.id, cwd: project.cwd });
-    return res.status(400).json({ error: `Directory not found: ${project.cwd}` });
+    throw Object.assign(new Error(`Directory not found: ${project.cwd}`), { status: 400 });
   }
 
   const child = spawn(command, args, {
@@ -329,14 +416,17 @@ app.post("/api/projects/:id/start", (req, res) => {
     detached: process.platform !== "win32",
   });
 
-  running.set(project.id, { proc: child, startedAt: Date.now() });
+  running.set(project.id, { proc: child, startedAt: Date.now(), script: chosen });
   logsById.set(project.id, []); // on repart d'une sortie vierge à chaque lancement
-  pushLog(project.id, `$ ${command} ${args.join(" ")}`);
+  pushLog(project.id, `$ ${command} ${args.join(" ")}\n`);
 
   child.stdout.on("data", (d) => pushLog(project.id, d.toString()));
   child.stderr.on("data", (d) => pushLog(project.id, d.toString()));
-  child.on("exit", (code) => {
-    pushLog(project.id, `--- processus terminé (code ${code}) ---`);
+
+  // code vaut null quand le process est tué par un signal (cas d'un stop).
+  child.on("exit", (code, signal) => {
+    const cause = code === null ? `signal ${signal}` : `code ${code}`;
+    pushLog(project.id, `--- processus terminé (${cause}) ---\n`);
     if (code) {
       const tail = (logsById.get(project.id) || []).slice(-15).join("").trim();
       logger.error(
@@ -345,28 +435,116 @@ app.post("/api/projects/:id/start", (req, res) => {
       );
     }
     running.delete(project.id);
+    pushState();
   });
+
   child.on("error", (err) => {
-    pushLog(project.id, `Erreur : ${err.message}`);
+    pushLog(project.id, `Erreur : ${err.message}\n`);
     logger.error(`Lancement impossible pour ${project.id}`, err);
     running.delete(project.id);
+    pushState();
   });
 
-  res.json({ ok: true, pid: child.pid });
+  watchUntilReady(project);
+  return child;
+}
+
+// Résout quand le process a réellement rendu la main, pour pouvoir enchaîner
+// sur un redémarrage sans relancer par-dessus l'ancien.
+function stopProject(id) {
+  return new Promise((resolve) => {
+    const entry = running.get(id);
+    if (!entry) return resolve(false);
+
+    let timer;
+    entry.proc.once("exit", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+    timer = setTimeout(() => {
+      logger.warn("Le process n'a pas rendu la main dans le délai imparti", { id });
+      resolve(true);
+    }, STOP_TIMEOUT_MS);
+
+    try {
+      process.kill(-entry.proc.pid, "SIGTERM");
+    } catch (e) {
+      logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${e.message}`, { id });
+      entry.proc.kill("SIGTERM");
+    }
+  });
+}
+
+/* -------------------------------------------------------------- routes --- */
+
+app.get("/api/projects", async (req, res) => {
+  try {
+    res.json(await computeState());
+  } catch (e) {
+    logger.error("Calcul de l'état impossible", e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post("/api/projects/:id/stop", (req, res) => {
-  const entry = running.get(req.params.id);
-  if (!entry) {
+app.get("/api/projects/:id/logs", (req, res) => {
+  res.json({
+    logs: logsById.get(req.params.id) || [],
+    seq: logSeq.get(req.params.id) || 0,
+  });
+});
+
+// Le bouton « Refresh » : force un envoi même si l'état n'a pas bougé.
+app.post("/api/refresh", async (req, res) => {
+  lastStateJson = "";
+  await pushState();
+  res.json({ ok: true });
+});
+
+app.post("/api/projects/:id/start", async (req, res) => {
+  try {
+    if (running.has(req.params.id)) return res.status(409).json({ error: "Already running" });
+    const project = resolveProject(req.params.id);
+    if (!project) {
+      logger.warn("Démarrage demandé pour un projet inconnu", { id: req.params.id });
+      return res.status(404).json({ error: "Project not found (please rescan)" });
+    }
+    const child = spawnProject(project, req.body.script);
+    await pushState();
+    res.json({ ok: true, pid: child.pid });
+  } catch (e) {
+    if (!e.status) logger.error("Démarrage impossible", e);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+app.post("/api/projects/:id/restart", async (req, res) => {
+  try {
+    const project = resolveProject(req.params.id);
+    if (!project) {
+      logger.warn("Redémarrage demandé pour un projet inconnu", { id: req.params.id });
+      return res.status(404).json({ error: "Project not found (please rescan)" });
+    }
+    // On relit le script en cours avant d'arrêter, pour repartir à l'identique.
+    const entry = running.get(project.id);
+    const script = req.body.script || (entry && entry.script) || undefined;
+
+    await stopProject(project.id);
+    const child = spawnProject(project, script);
+    await pushState();
+    res.json({ ok: true, pid: child.pid });
+  } catch (e) {
+    if (!e.status) logger.error("Redémarrage impossible", e);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+app.post("/api/projects/:id/stop", async (req, res) => {
+  const stopped = await stopProject(req.params.id);
+  if (!stopped) {
     logger.warn("Arrêt demandé pour un projet non lancé", { id: req.params.id });
     return res.status(404).json({ error: "Not running" });
   }
-  try {
-    process.kill(-entry.proc.pid, "SIGTERM");
-  } catch (e) {
-    logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${e.message}`, { id: req.params.id });
-    entry.proc.kill("SIGTERM");
-  }
+  await pushState();
   res.json({ ok: true });
 });
 

@@ -88,10 +88,33 @@ Pour changer le port du dashboard lui-même, ajuste `PORT` dans `.env`.
 
 ## Fonctionnement
 
-- **Démarrer** lance la commande détectée (ou choisie dans le menu déroulant) dans le dossier du projet, comme dans un terminal classique.
-- **Arrêter** tue proprement le process et ses enfants (ex. le process lancé par `npm run dev`).
-- **Logs** affiche la sortie standard/erreur en direct.
-- Couleur du point : gris = arrêté, turquoise = lancé par le dashboard, orange = un service répond déjà sur ce port sans être géré par le dashboard.
+- **Start** lance la commande détectée (ou choisie dans le menu déroulant) dans le dossier du projet, comme dans un terminal classique.
+- **Restart** prend la place de Start dès qu'un projet tourne : il arrête le process, attend qu'il ait
+  réellement rendu la main, puis le relance avec le même script.
+- **Stop** tue proprement le process et ses enfants (ex. le process lancé par `npm run dev`).
+- **Logs** affiche la sortie standard/erreur en direct, et reste consultable après un plantage.
+- **Refresh** force un rafraîchissement immédiat ; en temps normal il n'est pas nécessaire, la page
+  se met à jour d'elle-même.
+
+### Les quatre états d'un projet
+
+| Point | État | Signification |
+| --- | --- | --- |
+| gris | `stopped` | rien ne tourne |
+| bleu clignotant | `starting` | lancé par le dashboard, mais rien ne répond encore sur son port |
+| turquoise clignotant | `running` | lancé par le dashboard et joignable |
+| orange | `external` | un service répond déjà sur ce port sans être géré par le dashboard |
+
+Le bouton **Open** n'est actif qu'en `running` ou `external` : tant que le port ne répond pas, le
+lien reste grisé plutôt que de mener à une erreur de connexion. Un projet qui reste bloqué en
+`starting` est le signe qu'il n'écoute pas sur le port déclaré dans son `.env`.
+
+### Mise à jour en temps réel
+
+Le navigateur n'interroge plus le serveur en boucle : il ouvre un flux **SSE** sur `/api/events` et
+le serveur y pousse les changements d'état et chaque ligne de log au fil de l'eau. Concrètement les
+logs s'affichent sans délai, et le serveur ne scanne le disque que tant qu'au moins un onglet est
+ouvert. Si le serveur redémarre, le navigateur se reconnecte tout seul.
 
 ## Journal des erreurs
 
@@ -130,4 +153,4 @@ ne pas emporter les projets en cours d'exécution.
 - Si tu fermes le process `mini-launcher`, les projets qu'il a lancés s'arrêtent aussi.
 - Prévu pour tourner en local. L'accès est protégé par mot de passe, mais le trafic reste en HTTP
   en clair : derrière un reverse proxy TLS si tu l'exposes hors de ta machine.
-- Le scan lit chaque `package.json` à chaque rafraîchissement (léger, mais évite un `ROOT_DIR` avec des milliers de sous-dossiers).
+- Tant qu'un onglet est ouvert, le serveur relit les `package.json` toutes les 2 secondes (léger, mais évite un `ROOT_DIR` avec des milliers de sous-dossiers). Aucun onglet ouvert, aucun scan.
