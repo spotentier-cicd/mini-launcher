@@ -121,14 +121,40 @@ function renderRow(project) {
   return node;
 }
 
+const logsInFlight = new Set();
+
 async function refreshLogs(id, logsEl) {
+  if (logsInFlight.has(id)) return; // une requête est déjà en cours pour ce projet
+  logsInFlight.add(id);
   try {
     const res = await fetch(`/api/projects/${id}/logs`);
+    if (res.status === 401) {
+      location.href = "/login";
+      return;
+    }
     const data = await res.json();
-    logsEl.textContent = data.logs.join("") || "(no output yet)";
-    logsEl.scrollTop = logsEl.scrollHeight;
+    const text = data.logs.join("") || "(no output yet)";
+    if (text === logsEl.textContent) return; // rien de neuf : on ne touche pas au DOM
+
+    // On ne recolle en bas que si on y était déjà, pour ne pas arracher
+    // la vue à quelqu'un qui est remonté lire une erreur.
+    const atBottom = logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight < 24;
+    logsEl.textContent = text;
+    if (atBottom) logsEl.scrollTop = logsEl.scrollHeight;
   } catch {
     // silencieux : on retentera au prochain cycle
+  } finally {
+    logsInFlight.delete(id);
+  }
+}
+
+// Les logs vivent à leur propre rythme : le board, lui, n'est reconstruit
+// que lorsque l'état d'un projet change.
+function refreshOpenLogs() {
+  for (const id of openLogRows) {
+    const row = board.querySelector(`.row[data-id="${CSS.escape(id)}"]`);
+    const logsEl = row && row.querySelector(".logs");
+    if (logsEl) refreshLogs(id, logsEl);
   }
 }
 
@@ -186,3 +212,4 @@ document.getElementById("refresh").addEventListener("click", load);
 revealLogout();
 load();
 setInterval(load, 2500);
+setInterval(refreshOpenLogs, 1000);
