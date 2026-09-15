@@ -37,7 +37,10 @@ export function portOpen(port) {
 }
 
 /** Attend qu'une condition devienne vraie, sans dormir bêtement. */
-export async function waitFor(predicate, { timeout = 8000, interval = 50, label = "condition" } = {}) {
+// Un runner CI est nettement plus lent qu'une machine locale.
+const DEFAULT_WAIT = process.env.CI ? 20000 : 8000;
+
+export async function waitFor(predicate, { timeout = DEFAULT_WAIT, interval = 50, label = "condition" } = {}) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const value = await predicate();

@@ -1,0 +1,38 @@
+name: CI
+
+on: push
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # portHolder() et le nettoyage des tests identifient le process qui tient
+      # un port via lsof. Il n'est pas garanti sur l'image du runner.
+      - name: Installer lsof
+        run: sudo apt-get update && sudo apt-get install -y lsof
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Lancer la suite
+        run: npm test
+
+      # La suite démarre de vrais serveurs : en cas d'échec, les journaux
+      # qu'ils ont produits sont plus parlants que la sortie de vitest.
+      - name: Diagnostic en cas d'échec
+        if: failure()
+        run: |
+          echo "--- process node restants ---"
+          ps -eo pid,command | grep -i node | grep -v grep || true
+          echo "--- ports en écoute ---"
+          lsof -nP -iTCP -sTCP:LISTEN || true

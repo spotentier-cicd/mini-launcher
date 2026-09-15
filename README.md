@@ -1,5 +1,7 @@
 # Mini Launcher
 
+[![CI](https://github.com/spotentier-cicd/mini-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/spotentier-cicd/mini-launcher/actions/workflows/ci.yml)
+
 Un petit tableau de bord local qui **détecte automatiquement** tes projets Node (Express, Hono, etc.) dans un dossier, et permet de les lancer/arrêter/ouvrir depuis une seule page.
 
 ## Installation
@@ -167,6 +169,11 @@ signalé sans nommer le coupable.
 ```bash
 npm test
 ```
+
+La suite tourne aussi **à chaque push** via GitHub Actions
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) : Node 22 sur Ubuntu, `npm ci`
+puis `npm test`. Le workflow installe `lsof`, dont dépend l'identification du process qui
+occupe un port.
 
 Suite d'intégration sous vitest : chaque test démarre un vrai launcher sur un port libre,
 avec des projets factices dans un dossier temporaire. Elle couvre l'authentification et le
