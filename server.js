@@ -5,13 +5,31 @@ const path = require("node:path");
 const net = require("node:net");
 const crypto = require("node:crypto");
 const { execFileSync } = require("node:child_process");
-require('dotenv').config();
+const launcherEnv = require('dotenv').config();
 const logger = require("./logger");
 
 const PORT = process.env.PORT || 7777;
 const ROOT_DIR = process.env.ROOT_DIR || "../";
 const SCAN_DEPTH = process.env.SCAN_DEPTH || 2;
 const CONFIG_PATH = path.join(__dirname, "config.json");
+
+// La config du launcher ne doit pas fuiter dans les projets qu'il lance :
+// dotenv n'écrase jamais une variable déjà définie, donc un PORT hérité gagne
+// silencieusement sur le .env du projet — qui se met alors à écouter sur le
+// port du dashboard. Et DASHBOARD_PASSWORD n'a rien à faire dans un enfant.
+const LAUNCHER_ENV_KEYS = new Set([
+  ...Object.keys(launcherEnv.parsed || {}),
+  "PORT",
+  "ROOT_DIR",
+  "SCAN_DEPTH",
+  "DASHBOARD_PASSWORD",
+]);
+
+function childEnv() {
+  const env = { ...process.env };
+  for (const key of LAUNCHER_ENV_KEYS) delete env[key];
+  return env;
+}
 
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "";
 const AUTH_ENABLED = PASSWORD.length > 0;
@@ -535,7 +553,7 @@ async function spawnProject(project, script) {
   const child = spawn(command, args, {
     cwd: project.cwd,
     shell: true,
-    env: { ...process.env },
+    env: childEnv(),
     detached: process.platform !== "win32",
   });
 

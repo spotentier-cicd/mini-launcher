@@ -144,6 +144,13 @@ Si le projet n'a **aucun port connu**, il apparaît en `stopped` même s'il tour
 dashboard ne peut rien pour lui : ajoute une override `port` dans `config.json` pour le
 rendre visible.
 
+**L'environnement du launcher n'est pas transmis.** Les variables de son propre `.env`
+(`PORT`, `ROOT_DIR`, `SCAN_DEPTH`, `DASHBOARD_PASSWORD`) sont retirées de l'environnement
+des projets lancés. Sans ça, un projet héritait du `PORT` du dashboard et tentait
+d'écouter dessus : `dotenv` n'écrase jamais une variable déjà définie, donc le `.env` du
+projet était purement ignoré. Chaque projet lit donc bien sa propre configuration, et le
+mot de passe du dashboard ne se promène pas dans les process enfants.
+
 **Conflit de port.** Avant de lancer un projet, le port attendu est testé. S'il est déjà
 pris, le démarrage est refusé avec un message qui nomme le coupable plutôt que de laisser
 le projet mourir sur `EADDRINUSE` deux secondes plus tard :

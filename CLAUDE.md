@@ -118,6 +118,15 @@ comme avant. Deux garde-fous : seul le PID qui écoute est visé (pas son groupe
 launcher **refuse de tuer son propre PID** — il apparaît lui-même en `external` sur son
 port dès que `ROOT_DIR` le contient, donc sans ce contrôle un clic suffirait à le tuer.
 
+### L'environnement du launcher est filtré avant le spawn
+
+`childEnv()` retire de `process.env` les clés du `.env` du launcher (plus `PORT`,
+`ROOT_DIR`, `SCAN_DEPTH`, `DASHBOARD_PASSWORD` en dur) avant de les passer à un enfant.
+**Ne jamais revenir à `env: { ...process.env }`** : `dotenv` n'écrase pas une variable déjà
+définie, donc un `PORT` hérité gagne sur le `.env` du projet, qui se met à écouter sur le
+port du dashboard et meurt en `EADDRINUSE`. Le mot de passe fuitait aussi dans chaque
+process enfant.
+
 ### Contrôle de port avant lancement
 
 `spawnProject()` est `async` uniquement pour ce contrôle : si le port attendu répond déjà,
