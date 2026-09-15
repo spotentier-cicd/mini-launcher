@@ -5,6 +5,7 @@ const path = require("node:path");
 const net = require("node:net");
 const crypto = require("node:crypto");
 require('dotenv').config();
+const logger = require("./logger");
 
 const PORT = process.env.PORT || 7777;
 const ROOT_DIR = process.env.ROOT_DIR || "../";
@@ -85,14 +86,16 @@ app.post("/login", (req, res) => {
 
   const ip = req.ip || "unknown";
   const record = attempts.get(ip);
-  if (record && record.lockedUntil > Date.now()) return res.redirect("/login?error=locked");
+  if (record && record.lockedUntil > Date.now()) {
+    logger.warn("Tentative de connexion pendant le blocage", { ip });
+    return res.redirect("/login?error=locked");
+  }
 
   if (!passwordMatches(req.body.password || "")) {
     const count = (record ? record.count : 0) + 1;
-    attempts.set(ip, {
-      count,
-      lockedUntil: count >= MAX_ATTEMPTS ? Date.now() + LOCKOUT_MS : 0,
-    });
+    const locked = count >= MAX_ATTEMPTS;
+    attempts.set(ip, { count, lockedUntil: locked ? Date.now() + LOCKOUT_MS : 0 });
+    logger.warn(locked ? "Trop de tentatives, IP bloquée" : "Mot de passe invalide", { ip, count });
     return res.redirect("/login?error=invalid");
   }
 
@@ -121,8 +124,10 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, "public")));
 
-/** @type {Map<string, { proc: import('child_process').ChildProcess, logs: string[], startedAt: number }>} */
+/** @type {Map<string, { proc: import('child_process').ChildProcess, startedAt: number }>} */
 const running = new Map();
+/** @type {Map<string, string[]>} sortie conservée après l'arrêt, pour pouvoir lire un crash */
+const logsById = new Map();
 const MAX_LOG_LINES = 200;
 
 const PREFERRED_SCRIPTS = ["dev", "start", "serve"];
@@ -213,10 +218,13 @@ function applyOverrides(project, overrides) {
 }
 
 function pushLog(id, line) {
-  const entry = running.get(id);
-  if (!entry) return;
-  entry.logs.push(line);
-  if (entry.logs.length > MAX_LOG_LINES) entry.logs.shift();
+  let lines = logsById.get(id);
+  if (!lines) {
+    lines = [];
+    logsById.set(id, lines);
+  }
+  lines.push(line);
+  if (lines.length > MAX_LOG_LINES) lines.shift();
 }
 
 function checkPort(port) {
@@ -242,10 +250,12 @@ app.get("/api/projects", async (req, res) => {
   try {
     config = loadConfig();
   } catch (e) {
+    logger.error("Configuration illisible", e);
     return res.status(500).json({ error: e.message });
   }
 
   if (!fs.existsSync(ROOT_DIR)) {
+    logger.error("ROOT_DIR introuvable", { rootDir: ROOT_DIR });
     return res.status(400).json({ error: `Directory not found: ${ROOT_DIR}. Fix "ROOT_DIR" in .env.` });
   }
 
@@ -272,8 +282,7 @@ app.get("/api/projects", async (req, res) => {
 });
 
 app.get("/api/projects/:id/logs", (req, res) => {
-  const entry = running.get(req.params.id);
-  res.json({ logs: entry ? entry.logs : [] });
+  res.json({ logs: logsById.get(req.params.id) || [] });
 });
 
 app.post("/api/projects/:id/start", (req, res) => {
@@ -281,6 +290,7 @@ app.post("/api/projects/:id/start", (req, res) => {
   try {
     config = loadConfig();
   } catch (e) {
+    logger.error("Configuration illisible", e);
     return res.status(500).json({ error: e.message });
   }
 
@@ -288,7 +298,10 @@ app.post("/api/projects/:id/start", (req, res) => {
     applyOverrides(p, config.overrides)
   );
   const project = discovered.find((p) => p.id === req.params.id);
-  if (!project) return res.status(404).json({ error: "Project not found (please rescan)" });
+  if (!project) {
+    logger.warn("Démarrage demandé pour un projet inconnu", { id: req.params.id });
+    return res.status(404).json({ error: "Project not found (please rescan)" });
+  }
   if (running.has(project.id)) return res.status(409).json({ error: "Already running" });
 
   // Une override peut fournir une commande custom (ex. non-npm). Sinon on lance le script choisi via npm.
@@ -297,6 +310,7 @@ app.post("/api/projects/:id/start", (req, res) => {
   if (!command) {
     const script = req.body.script || project.defaultScript;
     if (!script) {
+      logger.warn("Aucun script npm exploitable", { id: project.id });
       return res.status(400).json({ error: "No npm script detected (dev/start/serve). Add an override in config.json." });
     }
     command = "npm";
@@ -304,6 +318,7 @@ app.post("/api/projects/:id/start", (req, res) => {
   }
 
   if (!fs.existsSync(project.cwd)) {
+    logger.error("Dossier du projet introuvable", { id: project.id, cwd: project.cwd });
     return res.status(400).json({ error: `Directory not found: ${project.cwd}` });
   }
 
@@ -314,17 +329,26 @@ app.post("/api/projects/:id/start", (req, res) => {
     detached: process.platform !== "win32",
   });
 
-  running.set(project.id, { proc: child, logs: [], startedAt: Date.now() });
+  running.set(project.id, { proc: child, startedAt: Date.now() });
+  logsById.set(project.id, []); // on repart d'une sortie vierge à chaque lancement
   pushLog(project.id, `$ ${command} ${args.join(" ")}`);
 
   child.stdout.on("data", (d) => pushLog(project.id, d.toString()));
   child.stderr.on("data", (d) => pushLog(project.id, d.toString()));
   child.on("exit", (code) => {
     pushLog(project.id, `--- processus terminé (code ${code}) ---`);
+    if (code) {
+      const tail = (logsById.get(project.id) || []).slice(-15).join("").trim();
+      logger.error(
+        `Projet « ${project.id} » terminé en erreur (code ${code})${tail ? `\n${tail}` : ""}`,
+        { command: `${command} ${args.join(" ")}`, cwd: project.cwd }
+      );
+    }
     running.delete(project.id);
   });
   child.on("error", (err) => {
     pushLog(project.id, `Erreur : ${err.message}`);
+    logger.error(`Lancement impossible pour ${project.id}`, err);
     running.delete(project.id);
   });
 
@@ -333,20 +357,32 @@ app.post("/api/projects/:id/start", (req, res) => {
 
 app.post("/api/projects/:id/stop", (req, res) => {
   const entry = running.get(req.params.id);
-  if (!entry) return res.status(404).json({ error: "Not running" });
+  if (!entry) {
+    logger.warn("Arrêt demandé pour un projet non lancé", { id: req.params.id });
+    return res.status(404).json({ error: "Not running" });
+  }
   try {
     process.kill(-entry.proc.pid, "SIGTERM");
-  } catch {
+  } catch (e) {
+    logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${e.message}`, { id: req.params.id });
     entry.proc.kill("SIGTERM");
   }
   res.json({ ok: true });
 });
 
+// Filet de sécurité : toute erreur qui remonte d'une route atterrit ici.
+app.use((err, req, res, _next) => {
+  logger.error(`Erreur non gérée sur ${req.method} ${req.originalUrl}`, err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: "Internal server error" });
+});
+
 app.listen(PORT, () => {
-  console.log(`\nDashboard available at http://localhost:${PORT}`);
-  console.log(
-    AUTH_ENABLED
-      ? "Access is password protected (DASHBOARD_PASSWORD).\n"
-      : "WARNING: DASHBOARD_PASSWORD is empty, the dashboard is open to anyone who can reach this port.\n"
-  );
+  logger.info(`Dashboard available at http://localhost:${PORT}`);
+  if (AUTH_ENABLED) {
+    logger.info("Access is password protected (DASHBOARD_PASSWORD).");
+  } else {
+    logger.warn("DASHBOARD_PASSWORD is empty, the dashboard is open to anyone who can reach this port.");
+  }
+  logger.info(`Errors are written to ${logger.logPath}`);
 });

@@ -93,6 +93,38 @@ Pour changer le port du dashboard lui-même, ajuste `PORT` dans `.env`.
 - **Logs** affiche la sortie standard/erreur en direct.
 - Couleur du point : gris = arrêté, turquoise = lancé par le dashboard, orange = un service répond déjà sur ce port sans être géré par le dashboard.
 
+## Journal des erreurs
+
+Les problèmes sont écrits dans **`logs/error.log`** (créé automatiquement, ignoré par git),
+en clair et horodatés :
+
+```
+2026-09-15 12:57:24 [ERROR] Projet « crasher » terminé en erreur (code 1)
+$ npm run dev
+démarrage…
+Error: impossible de se connecter à la base (ECONNREFUSED 5432)
+--- processus terminé (code 1) --- {"command":"npm run dev","cwd":"/…/crasher"}
+```
+
+Ce qui y atterrit :
+
+- un projet qui se termine avec un code non nul, **avec les 15 dernières lignes de sa sortie** ;
+- un projet impossible à lancer (commande introuvable, dossier disparu) ;
+- `config.json` illisible ou `ROOT_DIR` inexistant ;
+- les mots de passe invalides et les blocages d'IP, avec l'IP concernée ;
+- toute exception non catchée ou promesse rejetée, stack comprise.
+
+Le fonctionnement normal (démarrages, arrêts) reste sur la sortie console et n'encombre
+pas le fichier. La sortie courante d'un projet se lit dans l'interface via le bouton
+**Logs** — elle reste consultable après un plantage.
+
+Rotation automatique : 5 fichiers de 1 Mo maximum, le plus récent étant toujours
+`error.log`. Rien à purger à la main.
+
+Une exception non catchée est journalisée puis le serveur s'arrête (comportement par
+défaut de Node). Une promesse rejetée est journalisée mais n'arrête pas le serveur, pour
+ne pas emporter les projets en cours d'exécution.
+
 ## Limites à connaître
 
 - Si tu fermes le process `mini-launcher`, les projets qu'il a lancés s'arrêtent aussi.
