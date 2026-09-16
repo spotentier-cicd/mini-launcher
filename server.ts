@@ -94,13 +94,20 @@ function asError(e: unknown): HttpError {
   return new Error(String(e));
 }
 
-const PORT = Number(process.env.PORT) || 7777;
+/** `Number(x) || défaut` avale un 0 légitime : SCAN_DEPTH=0 devenait 2 en silence. */
+function envNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const PORT = envNumber(process.env.PORT, 7777);
 // Le dashboard exécute des commandes arbitraires : il n'a rien à faire sur une
 // interface publique. Ouvrir au-delà de la boucle locale doit rester un geste
 // explicite, et impose alors un mot de passe (voir le garde avant listen()).
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 const ROOT_DIR = process.env.ROOT_DIR || "../";
-const SCAN_DEPTH = Number(process.env.SCAN_DEPTH) || 2;
+const SCAN_DEPTH = envNumber(process.env.SCAN_DEPTH, 2);
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "config.json");
 
 // La config du launcher ne doit pas fuiter dans les projets qu'il lance :
@@ -133,7 +140,7 @@ const AUTH_ENABLED = PASSWORD.length > 0;
 const SESSION_COOKIE = "launcher_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const MAX_ATTEMPTS = 8;                        // avant blocage temporaire
-const LOCKOUT_MS = Number(process.env.LOCKOUT_MS) || 5 * 60 * 1000;
+const LOCKOUT_MS = envNumber(process.env.LOCKOUT_MS, 5 * 60 * 1000);
 
 /** @type {Map<string, number>} token de session -> date d'expiration */
 const sessions = new Map<string, number>();
@@ -271,9 +278,9 @@ const MAX_CHUNK_CHARS = 8 * 1024;
 
 const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connecté
 const READY_TIMEOUT_MS = 30000;   // au-delà, on cesse de sonder le port au démarrage
-const STOP_TIMEOUT_MS = Number(process.env.STOP_TIMEOUT_MS) || 5000; // avant SIGKILL
+const STOP_TIMEOUT_MS = envNumber(process.env.STOP_TIMEOUT_MS, 5000); // avant SIGKILL
 const KILL_GRACE_MS = 1000;       // après SIGKILL, avant de renoncer
-const PORT_RELEASE_TIMEOUT_MS = Number(process.env.PORT_RELEASE_TIMEOUT_MS) || 3000;
+const PORT_RELEASE_TIMEOUT_MS = envNumber(process.env.PORT_RELEASE_TIMEOUT_MS, 3000);
 
 const WINDOWS = process.platform === "win32";
 
@@ -376,7 +383,8 @@ function detectPortFromOutput(id: string, text: string): void {
   if (detectedPorts.has(id)) return; // on garde la première adresse annoncée
   const match = text.replace(ANSI_RE, "").match(URL_RE);
   if (!match) return;
-  detectedPorts.set(id, Number(match[1]));
+  if (!match[1]) return;
+  detectedPorts.set(id, Number.parseInt(match[1], 10));
   persistRunning(); // le registre doit connaître le port : il sert de garde-fou à la reprise
   pushState();
 }

@@ -73,6 +73,18 @@ describe("détection des projets", () => {
     expect(projects.map((p) => p.id)).toEqual(["groupe__imbrique"]);
   });
 
+  it("respecte SCAN_DEPTH=0, qui ne retient que ROOT_DIR lui-même", async () => {
+    const root = makeRoot();
+    addProject(root, "sous-dossier");
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "racine" }));
+
+    // `Number("0") || 2` valait 2 : la profondeur demandée était ignorée.
+    const launcher = await startLauncher({ root, env: { SCAN_DEPTH: "0" } });
+    const projects = await launcher.json<ProjectState[]>("/api/projects");
+
+    expect(projects.map((p) => p.id)).toEqual([path.basename(root)]);
+  });
+
   it("applique les overrides de config.json par-dessus la détection", async () => {
     const root = makeRoot();
     addProject(root, "brut", { env: "PORT=1111\n" });
