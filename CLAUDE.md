@@ -87,7 +87,10 @@ Deux points à respecter en ajoutant un test :
   (`fileParallelism: false`) mais les ports restent alloués dynamiquement.
 
 Le harnais impose deux surcharges au serveur, `LOG_DIR` et `CONFIG_PATH`, pour qu'aucun
-test n'écrive dans `logs/` ni ne lise le `config.json` du dépôt. Il lance directement
+test n'écrive dans `logs/` ni ne lise le `config.json` du dépôt. D'autres variables existent
+pour les tests : `STATE_DIR`, `STOP_TIMEOUT_MS`, `PORT_RELEASE_TIMEOUT_MS`, `LOCKOUT_MS`.
+Toute variable ajoutée ici **doit** rejoindre `LAUNCHER_ENV_KEYS`, sinon elle fuit dans les
+projets lancés. Il lance directement
 `server.ts`, sans build.
 
 Pour une capture d'écran en headless : utiliser `--timeout=2500`, **pas**
@@ -131,8 +134,12 @@ trois types d'évènements : `projects` (état complet), `log` (un chunk de sort
 Conséquence directe : **toute mutation d'état côté serveur doit appeler `pushState()`**,
 sinon l'interface ne bouge pas. C'est le piège principal en ajoutant une route.
 
-`pushState()` ne fait rien si aucun client n'est connecté, et ne diffuse que si le JSON a
-changé depuis le dernier envoi (`lastStateJson`). La boucle de scan (`startStateLoop` /
+`pushState()` ne fait rien si aucun client n'est connecté, et n'envoie à un client que si
+le JSON diffère de ce qu'il a **lui-même** reçu (`lastSentByClient`). La comparaison est par
+client parce qu'un unique « dernier état diffusé » était écrit à la fois par la boucle et par
+chaque nouvelle connexion : une connexion pouvait faire passer un état pour déjà envoyé et
+en priver les autres onglets. `pushState()` est aussi sérialisé (`pushing`/`pushPending`) —
+un tour peut durer plus de 2 s à cause des sondages de port. La boucle de scan (`startStateLoop` /
 `stopStateLoop`) n'existe que tant que `sseClients` est non vide : sans onglet ouvert, le
 serveur ne lit pas le disque.
 
@@ -188,7 +195,8 @@ Les enfants sont lancés `detached`, donc ils **survivent à l'arrêt du launche
 Sans reprise ils réapparaissent en `external`, où Stop est désactivé — l'outil oblige alors
 à ouvrir un terminal, ce qu'il est censé éviter.
 
-`persistRunning()` écrit `logs/running.json` à chaque changement, **y compris depuis
+`persistRunning()` écrit `running.json` (dans `STATE_DIR`, qui retombe sur le dossier des
+journaux) à chaque changement, **y compris depuis
 `detectPortFromOutput()`** : le port sert de garde-fou anti-réutilisation de PID au
 redémarrage, il doit donc être dans le registre. `recoverOrphans()` n'adopte un PID que
 s'il est vivant et, quand un port était connu, qu'il répond toujours.

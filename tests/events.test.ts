@@ -105,6 +105,33 @@ describe("flux d'évènements", () => {
     stream.close();
   });
 
+  it("ne prive pas un client d'une mise à jour quand un autre se connecte", async () => {
+    const root = makeRoot();
+    addProject(root, "alpha");
+    const launcher = await startLauncher({ root });
+
+    const first = await openEvents(launcher);
+    await waitFor(() => first.ofType("projects").length > 0, { label: "état initial" });
+
+    // L'état change, puis un second client se connecte. Avec une comparaison
+    // globale, cette connexion faisait passer le nouvel état pour déjà diffusé
+    // et le premier client ne le recevait jamais.
+    addProject(root, "beta");
+    const second = await openEvents(launcher);
+    await waitFor(() => second.ofType("projects").length > 0, { label: "état du second client" });
+
+    await waitFor(
+      () => {
+        const last = first.ofType("projects").at(-1);
+        return (last?.data as ProjectState[] | undefined)?.some((p) => p.id === "beta");
+      },
+      { label: "beta vu par le premier client" }
+    );
+
+    first.close();
+    second.close();
+  });
+
   it("pousse les lignes de log avec un numéro croissant", async () => {
     const root = makeRoot();
     addProject(root, "bavard", {

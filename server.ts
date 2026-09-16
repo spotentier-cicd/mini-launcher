@@ -70,6 +70,17 @@ function paramId(req: Request): string {
   return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
 }
 
+/**
+ * Express 4 ne rattrape pas le rejet d'un handler `async` : l'erreur n'atteint
+ * jamais le middleware d'erreur et la requête reste pendante jusqu'au timeout
+ * du client. On redirige donc explicitement vers `next`.
+ */
+function asyncRoute(handler: (req: Request, res: Response) => Promise<unknown>) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    void handler(req, res).catch(next);
+  };
+}
+
 /** `catch (e)` donne un `unknown` : on le ramène à une Error exploitable. */
 function asError(e: unknown): HttpError {
   if (e instanceof Error) return e;
@@ -109,6 +120,7 @@ const LAUNCHER_ENV_KEYS = new Set([
   "STOP_TIMEOUT_MS",
   "PORT_RELEASE_TIMEOUT_MS",
   "LOCKOUT_MS",
+  "STATE_DIR",
 ]);
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -127,7 +139,7 @@ const LOCKOUT_MS = Number(process.env.LOCKOUT_MS) || 5 * 60 * 1000;
 /** @type {Map<string, number>} token de session -> date d'expiration */
 const sessions = new Map<string, number>();
 /** @type {Map<string, { count: number, lockedUntil: number }>} ip -> tentatives ratées */
-const attempts = new Map<string, { count: number; lockedUntil: number }>();
+const attempts = new Map<string, { count: number; lockedUntil: number; seenAt: number }>();
 
 // Chemins accessibles sans être authentifié (page de login et son habillage).
 const OPEN_PATHS = new Set(["/login", "/style.css", "/favicon.ico"]);
@@ -202,7 +214,7 @@ app.post("/login", (req: Request, res: Response) => {
     const expired = Boolean(record && record.lockedUntil);
     const count = (record && !expired ? record.count : 0) + 1;
     const locked = count >= MAX_ATTEMPTS;
-    attempts.set(ip, { count, lockedUntil: locked ? Date.now() + LOCKOUT_MS : 0 });
+    attempts.set(ip, { count, lockedUntil: locked ? Date.now() + LOCKOUT_MS : 0, seenAt: Date.now() });
     logger.warn(locked ? "Trop de tentatives, IP bloquée" : "Mot de passe invalide", { ip, count });
     return res.redirect("/login?error=invalid");
   }
@@ -240,13 +252,20 @@ const logSeq = new Map<string, number>();
 /** @type {Map<string, number>} port lu dans la sortie du projet, plus fiable que son .env */
 const detectedPorts = new Map<string, number>();
 
-const STATE_PATH = path.join(logger.logDir, "running.json");
+// Le registre des process n'est pas un journal : il a son propre réglage, qui
+// retombe sur le dossier des journaux pour rester compatible avec l'existant.
+const STATE_DIR = process.env.STATE_DIR || logger.logDir;
+fs.mkdirSync(STATE_DIR, { recursive: true });
+const STATE_PATH = path.join(STATE_DIR, "running.json");
 
 // Vite, Next, Hono… annoncent tous leur adresse au démarrage. La lire évite de
 // dépendre d'un PORT dans le .env du projet, que la plupart n'ont pas.
 const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})/;
 const ANSI_RE = /\u001B\[[0-9;]*[a-zA-Z]/g;
 const MAX_LOG_LINES = 200;
+// MAX_LOG_LINES compte des chunks, pas des octets : sans plafond, un projet qui
+// écrit 10 Mo d'un coup les garde en mémoire et les pousse à tous les clients.
+const MAX_CHUNK_CHARS = 8 * 1024;
 
 const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connecté
 const READY_TIMEOUT_MS = 30000;   // au-delà, on cesse de sonder le port au démarrage
@@ -337,6 +356,15 @@ function applyOverrides(project: Project, overrides: Record<string, Override>): 
   if (!o) return project;
   const merged = { ...project, ...o };
   if (o.port && !o.url) merged.url = `http://localhost:${o.port}`;
+  // Une url sans port fige la détection tout en laissant le port inconnu : le
+  // statut ne peut alors plus passer par le port. On le relit dans l'url.
+  if (o.url && !o.port) {
+    try {
+      merged.port = Number(new URL(o.url).port) || null;
+    } catch {
+      merged.port = null; // url inexploitable, on n'en tire rien
+    }
+  }
   // Un port posé à la main dans config.json l'emporte sur ce qu'on détecterait.
   if (o.port || o.url) merged.pinnedPort = true;
   return merged;
@@ -351,7 +379,11 @@ function detectPortFromOutput(id: string, text: string): void {
   pushState();
 }
 
-function pushLog(id: string, line: string): void {
+function pushLog(id: string, chunk: string): void {
+  const line =
+    chunk.length > MAX_CHUNK_CHARS
+      ? `${chunk.slice(0, MAX_CHUNK_CHARS)}\n--- ${chunk.length - MAX_CHUNK_CHARS} caractères tronqués ---\n`
+      : chunk;
   let lines = logsById.get(id);
   if (!lines) {
     lines = [];
@@ -365,7 +397,7 @@ function pushLog(id: string, line: string): void {
   broadcast("log", { id, seq, chunk: line });
 }
 
-function checkPort(port: number): Promise<boolean> {
+function probePort(port: number, host: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(400);
@@ -379,8 +411,16 @@ function checkPort(port: number): Promise<boolean> {
         resolve(false);
       })
       .once("error", () => resolve(false))
-      .connect(port, "127.0.0.1");
+      .connect(port, host);
   });
+}
+
+// Les deux familles en parallèle, pas l'une après l'autre : un projet qui
+// n'écoute que sur ::1 restait « starting » à vie, et sonder en série doublerait
+// la latence de chaque tour de boucle pour tous les ports fermés.
+async function checkPort(port: number): Promise<boolean> {
+  const [v4, v6] = await Promise.all([probePort(port, "127.0.0.1"), probePort(port, "::1")]);
+  return v4 || v6;
 }
 
 /* -------------------------------------------------------- état partagé --- */
@@ -464,39 +504,85 @@ async function computeState(): Promise<ProjectState[]> {
 
 /** @type {Set<import('express').Response>} */
 const sseClients = new Set<Response>();
+// Comparaison par client, et non sur un unique dernier état diffusé : ce dernier
+// était écrit à la fois par la boucle et par chaque nouvelle connexion, si bien
+// qu'une connexion pouvait faire passer un état pour déjà diffusé et en priver
+// les autres clients. Un compteur global ne sait pas qui a reçu quoi.
+const lastSentByClient = new Map<Response, string>();
 let stateTimer: NodeJS.Timeout | null = null;
-let lastStateJson = "";
 let lastFailure = "";
 
 function send(res: Response, event: string, data: unknown): void {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  } catch (e) {
+    // Socket morte dont le « close » n'est pas encore passé : écrire dessus
+    // lèverait, et ce rejet remonterait dans un pushState() appelé sans await.
+    sseClients.delete(res);
+    lastSentByClient.delete(res);
+    logger.warn(`Client SSE injoignable : ${asError(e).message}`);
+  }
 }
 
 function broadcast(event: string, data: unknown): void {
   for (const res of sseClients) send(res, event, data);
 }
 
-async function pushState() {
+// Un tour peut durer plus longtemps que STATE_INTERVAL_MS (sondages de port) :
+// sans ce verrou, deux calculs s'entrelacent et l'un écrase la comparaison de
+// l'autre — un client peut alors ne jamais recevoir un état pourtant nouveau.
+let pushing = false;
+let pushPending = false;
+
+async function pushState(): Promise<void> {
   if (sseClients.size === 0) return;
-  let state;
-  try {
-    state = await computeState();
-  } catch (e) {
-    // La boucle tourne toutes les 2 s : on ne journalise qu'au changement
-    // d'erreur, sinon une mauvaise config remplirait error.log.
-    const error = asError(e);
-    if (error.message !== lastFailure) {
-      lastFailure = error.message;
-      logger.error("Calcul de l'état impossible", error);
-    }
-    broadcast("failure", { error: error.message });
+  if (pushing) {
+    pushPending = true;
     return;
   }
-  lastFailure = "";
-  const json = JSON.stringify(state);
-  if (json === lastStateJson) return; // rien de neuf : aucun octet envoyé
-  lastStateJson = json;
-  broadcast("projects", state);
+  pushing = true;
+  try {
+    let state;
+    try {
+      state = await computeState();
+    } catch (e) {
+      // La boucle tourne toutes les 2 s : on ne journalise qu'au changement
+      // d'erreur, sinon une mauvaise config remplirait error.log.
+      const error = asError(e);
+      if (error.message !== lastFailure) {
+        lastFailure = error.message;
+        logger.error("Calcul de l'état impossible", error);
+      }
+      broadcast("failure", { error: error.message });
+      return;
+    }
+    lastFailure = "";
+    pruneVanished(new Set(state.map((p) => p.id)));
+    const json = JSON.stringify(state);
+    for (const res of sseClients) {
+      if (lastSentByClient.get(res) === json) continue; // rien de neuf pour lui
+      send(res, "projects", state);
+      lastSentByClient.set(res, json);
+    }
+  } finally {
+    pushing = false;
+    if (pushPending) {
+      pushPending = false;
+      void pushState();
+    }
+  }
+}
+
+// Les tampons de sortie survivent volontairement à la mort d'un process, mais
+// pas à la disparition de son dossier : plus personne ne peut les consulter.
+function pruneMap<V>(map: Map<string, V>, known: Set<string>): void {
+  for (const id of map.keys()) if (!known.has(id) && !running.has(id)) map.delete(id);
+}
+
+function pruneVanished(known: Set<string>): void {
+  pruneMap(logsById, known);
+  pruneMap(logSeq, known);
+  pruneMap(detectedPorts, known);
 }
 
 function startStateLoop() {
@@ -507,10 +593,20 @@ function startStateLoop() {
 function stopStateLoop(): void {
   if (stateTimer) clearInterval(stateTimer);
   stateTimer = null;
-  lastStateJson = "";
 }
 
-app.get("/api/events", async (req: Request, res: Response) => {
+// Ni les sessions ni les tentatives n'expiraient d'elles-mêmes : seules celles
+// qu'on relisait disparaissaient. unref() pour ne pas retenir le process.
+const JANITOR_INTERVAL_MS = 10 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, expiresAt] of sessions) if (expiresAt < now) sessions.delete(token);
+  for (const [ip, record] of attempts) {
+    if (record.lockedUntil <= now && now - record.seenAt > LOCKOUT_MS) attempts.delete(ip);
+  }
+}, JANITOR_INTERVAL_MS).unref();
+
+app.get("/api/events", asyncRoute(async (req: Request, res: Response) => {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -521,9 +617,11 @@ app.get("/api/events", async (req: Request, res: Response) => {
   startStateLoop();
 
   try {
+    // Envoi au seul nouveau client, et mémorisé pour lui seul : les autres
+    // gardent leur propre point de comparaison.
     const state = await computeState();
-    lastStateJson = JSON.stringify(state);
     send(res, "projects", state);
+    lastSentByClient.set(res, JSON.stringify(state));
   } catch (e) {
     send(res, "failure", { error: asError(e).message });
   }
@@ -534,9 +632,10 @@ app.get("/api/events", async (req: Request, res: Response) => {
   req.on("close", () => {
     clearInterval(heartbeat);
     sseClients.delete(res);
+    lastSentByClient.delete(res);
     if (sseClients.size === 0) stopStateLoop();
   });
-});
+}));
 
 /* ------------------------------------------------ persistance / reprise --- */
 
@@ -605,13 +704,23 @@ async function recoverOrphans() {
 
 // Attente active courte après un lancement, pour basculer « starting » ->
 // « running » dès que le port répond plutôt qu'au prochain tour de boucle.
+// Un jeton par projet : trois start/stop rapides laissaient trois boucles de
+// 30 s sonder le même port en même temps, sans moyen de les arrêter.
+const readyWatch = new Map<string, number>();
+let readyToken = 0;
+
 async function watchUntilReady(project: Project): Promise<void> {
+  const token = ++readyToken;
+  readyWatch.set(project.id, token);
   const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (running.has(project.id) && Date.now() < deadline) {
+  while (readyWatch.get(project.id) === token && running.has(project.id) && Date.now() < deadline) {
     const port = detectedPorts.get(project.id) || project.port;
-    if (port && (await checkPort(port))) return pushState();
+    if (port && (await checkPort(port))) break;
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
+  if (readyWatch.get(project.id) !== token) return; // une veille plus récente a pris la main
+  readyWatch.delete(project.id);
+  await pushState();
 }
 
 // Identification best-effort de ce qui occupe un port, pour un message utile.
@@ -858,7 +967,7 @@ async function stopProject(id: string): Promise<boolean> {
 
 /* -------------------------------------------------------------- routes --- */
 
-app.get("/api/projects", async (_req: Request, res: Response) => {
+app.get("/api/projects", asyncRoute(async (_req: Request, res: Response) => {
   try {
     res.json(await computeState());
   } catch (e) {
@@ -866,7 +975,7 @@ app.get("/api/projects", async (_req: Request, res: Response) => {
     logger.error("Calcul de l'état impossible", error);
     res.status(500).json({ error: error.message });
   }
-});
+}));
 
 app.get("/api/projects/:id/logs", (req: Request, res: Response) => {
   res.json({
@@ -876,14 +985,14 @@ app.get("/api/projects/:id/logs", (req: Request, res: Response) => {
 });
 
 // Le bouton « Refresh » : force un envoi même si l'état n'a pas bougé.
-app.post("/api/refresh", async (_req: Request, res: Response) => {
+app.post("/api/refresh", asyncRoute(async (_req: Request, res: Response) => {
   invalidateScan();
-  lastStateJson = "";
+  lastSentByClient.clear(); // « Refresh » renvoie l'état même s'il n'a pas bougé
   await pushState();
   res.json({ ok: true });
-});
+}));
 
-app.post("/api/projects/:id/start", async (req: Request, res: Response) => {
+app.post("/api/projects/:id/start", asyncRoute(async (req: Request, res: Response) => {
   try {
     if (running.has(paramId(req))) return res.status(409).json({ error: "Already running" });
     const project = resolveProject(paramId(req));
@@ -899,9 +1008,9 @@ app.post("/api/projects/:id/start", async (req: Request, res: Response) => {
     if (!error.status) logger.error("Démarrage impossible", error);
     res.status(error.status || 500).json({ error: error.message });
   }
-});
+}));
 
-app.post("/api/projects/:id/restart", async (req: Request, res: Response) => {
+app.post("/api/projects/:id/restart", asyncRoute(async (req: Request, res: Response) => {
   try {
     const project = resolveProject(paramId(req));
     if (!project) {
@@ -921,9 +1030,9 @@ app.post("/api/projects/:id/restart", async (req: Request, res: Response) => {
     if (!error.status) logger.error("Redémarrage impossible", error);
     res.status(error.status || 500).json({ error: error.message });
   }
-});
+}));
 
-app.post("/api/projects/:id/stop", async (req: Request, res: Response) => {
+app.post("/api/projects/:id/stop", asyncRoute(async (req: Request, res: Response) => {
   const stopped = await stopProject(paramId(req));
   if (stopped) {
     await pushState();
@@ -974,7 +1083,7 @@ app.post("/api/projects/:id/stop", async (req: Request, res: Response) => {
 
   logger.warn("Arrêt demandé pour un projet non lancé", { id: paramId(req) });
   res.status(404).json({ error: "Not running" });
-});
+}));
 
 // Filet de sécurité : toute erreur qui remonte d'une route atterrit ici.
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
