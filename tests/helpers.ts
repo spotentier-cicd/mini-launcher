@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { ProjectState } from "../src/types.js";
 
 const PROJECT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const SERVER = path.join(PROJECT_ROOT, "server.ts");
+export const SERVER = path.join(PROJECT_ROOT, "server.ts");
 
 /** Dossiers temporaires créés pendant un test, nettoyés par cleanupAll(). */
 const tempDirs = new Set<string>();

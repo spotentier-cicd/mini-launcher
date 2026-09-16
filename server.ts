@@ -85,6 +85,10 @@ function asError(e: unknown): HttpError {
 }
 
 const PORT = Number(process.env.PORT) || 7777;
+// Le dashboard exécute des commandes arbitraires : il n'a rien à faire sur une
+// interface publique. Ouvrir au-delà de la boucle locale doit rester un geste
+// explicite, et impose alors un mot de passe (voir le garde avant listen()).
+const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 const ROOT_DIR = process.env.ROOT_DIR || "../";
 const SCAN_DEPTH = Number(process.env.SCAN_DEPTH) || 2;
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "config.json");
@@ -99,6 +103,7 @@ const LAUNCHER_ENV_KEYS = new Set([
   "ROOT_DIR",
   "SCAN_DEPTH",
   "DASHBOARD_PASSWORD",
+  "BIND_HOST",
   "LOG_DIR",
   "CONFIG_PATH",
 ]);
@@ -241,6 +246,8 @@ const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connec
 const READY_TIMEOUT_MS = 30000;   // au-delà, on cesse de sonder le port au démarrage
 const STOP_TIMEOUT_MS = 5000;     // au-delà, on considère l'arrêt acquis
 const PORT_RELEASE_TIMEOUT_MS = 3000; // attente max de libération du port après un arrêt
+
+const WINDOWS = process.platform === "win32";
 
 const PREFERRED_SCRIPTS = ["dev", "start", "serve"];
 const IGNORED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".turbo", ".cache"]);
@@ -608,7 +615,18 @@ async function spawnProject(project: Project, script?: string): Promise<ChildPro
         { status: 400 }
       );
     }
-    command = "npm";
+    // `chosen` vient du corps de la requête. Sans cette liste blanche il partait
+    // tel quel dans la ligne de commande : « dev; rm -rf ~ » était exécuté.
+    if (!project.scripts.includes(chosen)) {
+      logger.warn("Script inconnu demandé", { id: project.id, script: chosen });
+      throw Object.assign(
+        new Error(
+          `Unknown script "${chosen}". Available: ${project.scripts.join(", ") || "none"}.`
+        ),
+        { status: 400 }
+      );
+    }
+    command = WINDOWS ? "npm.cmd" : "npm";
     args = ["run", chosen];
   }
 
@@ -633,11 +651,15 @@ async function spawnProject(project: Project, script?: string): Promise<ChildPro
     );
   }
 
+  // Pas de shell : commande et arguments restent deux choses distinctes, donc
+  // rien de ce qu'ils contiennent ne peut être relu comme de la syntaxe shell.
+  // Windows fait exception : depuis la CVE-2024-27980, Node refuse de lancer un
+  // .cmd sans shell — la liste blanche ci-dessus reste alors la vraie barrière.
   const child = spawn(command, args, {
     cwd: project.cwd,
-    shell: true,
+    shell: WINDOWS,
     env: childEnv(),
-    detached: process.platform !== "win32",
+    detached: !WINDOWS,
   });
 
   if (child.pid === undefined) {
@@ -891,7 +913,18 @@ app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
 
 recoverOrphans();
 
-app.listen(PORT, () => {
+// Ouvrir hors boucle locale sans mot de passe offrirait l'exécution de commandes
+// à qui atteint le port. On refuse de démarrer plutôt que de le laisser passer.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+if (!LOOPBACK_HOSTS.has(BIND_HOST) && !AUTH_ENABLED) {
+  logger.error(
+    `BIND_HOST=${BIND_HOST} expose un outil qui exécute des commandes : ` +
+      "renseigne DASHBOARD_PASSWORD, ou reviens sur 127.0.0.1."
+  );
+  process.exit(1);
+}
+
+app.listen(PORT, BIND_HOST, () => {
   logger.info(`Dashboard available at http://localhost:${PORT}`);
   if (AUTH_ENABLED) {
     logger.info("Access is password protected (DASHBOARD_PASSWORD).");

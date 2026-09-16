@@ -259,8 +259,21 @@ fix(MNLCH-6): logs in flight refresh
 
 Branche de travail : `dev`. Branche principale : `main`.
 
-## Point ouvert
+## Ce qui lance un process est du code sensible
 
-`app.listen(PORT, …)` n'a pas d'argument d'hôte : le dashboard écoute sur toutes les
-interfaces alors qu'il exécute des commandes arbitraires. Signalé, non corrigé — le
-correctif est `app.listen(PORT, "127.0.0.1", …)`.
+Le dashboard exécute des commandes : deux invariants tiennent tout le reste.
+
+**Le nom de script vient du réseau.** `req.body.script` traverse `/start` et `/restart`
+jusqu'à `spawnProject()`. Il est validé contre `project.scripts` — une liste blanche lue
+dans le `package.json` du projet. Sans elle, « dev; \<commande\> » était exécuté tel quel.
+Ne jamais faire confiance à cette valeur ailleurs.
+
+**Pas de `shell: true`.** Commande et arguments restent deux choses distinctes, donc rien
+de ce qu'ils contiennent ne peut être relu comme de la syntaxe shell. Windows est la seule
+exception (Node refuse de lancer un `.cmd` sans shell depuis la CVE-2024-27980) ; c'est là
+que la liste blanche devient la seule barrière. L'override `command`/`args` de
+`config.json` est structurée elle aussi — pas une ligne de commande à découper.
+
+**L'écoute est sur la boucle locale.** `app.listen(PORT, BIND_HOST, …)` avec
+`BIND_HOST=127.0.0.1` par défaut. Une autre valeur sans `DASHBOARD_PASSWORD` fait sortir le
+serveur en code 1 plutôt que d'offrir l'exécution de commandes à qui atteint le port.

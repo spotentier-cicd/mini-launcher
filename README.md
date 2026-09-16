@@ -22,6 +22,7 @@ cp .env.example .env
 | Variable | Rôle |
 | --- | --- |
 | `PORT` | port du dashboard lui-même (7777 par défaut) |
+| `BIND_HOST` | interface d'écoute (`127.0.0.1` par défaut, donc cette machine uniquement). Toute autre valeur expose un outil qui exécute des commandes : le serveur refuse alors de démarrer sans `DASHBOARD_PASSWORD` |
 | `ROOT_DIR` | dossier parent qui contient tous tes petits projets (chacun dans son propre sous-dossier) |
 | `SCAN_DEPTH` | jusqu'à combien de niveaux de sous-dossiers explorer avant de considérer qu'il n'y a pas de projet (2 par défaut : ça couvre `ROOT_DIR/projet` et `ROOT_DIR/groupe/projet`) |
 | `DASHBOARD_PASSWORD` | mot de passe d'accès au dashboard (voir plus bas) |
