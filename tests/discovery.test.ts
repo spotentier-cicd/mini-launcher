@@ -88,6 +88,25 @@ describe("détection des projets", () => {
     expect(project.url).toBe("http://localhost:4500");
   });
 
+  /** Le contrat de src/types.d.ts n'est pas tenu par le compilateur sur un spread. */
+  it("n'expose au client que les champs déclarés dans ProjectState", async () => {
+    const root = makeRoot();
+    addProject(root, "brut", { env: "PORT=1111\n" });
+
+    const launcher = await startLauncher({
+      root,
+      config: { overrides: { brut: { port: 4500 } } },
+    });
+    const [project] = await launcher.json<ProjectState[]>("/api/projects");
+
+    const declared = [
+      "id", "name", "cwd", "scripts", "defaultScript", "port", "url",
+      "status", "pid", "startedAt", "adopted", "command", "args",
+    ];
+    expect(Object.keys(project!).filter((k) => !declared.includes(k))).toEqual([]);
+    expect(project).not.toHaveProperty("pinnedPort");
+  });
+
   it("signale une erreur exploitable quand ROOT_DIR n'existe pas", async () => {
     const launcher = await startLauncher({ root: "/chemin/qui/nexiste/pas" });
     const res = await launcher.fetch("/api/projects");

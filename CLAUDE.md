@@ -58,7 +58,9 @@ type Request = import("express").Request;
 ```
 
 `src/types.d.ts` porte le contrat partagé entre serveur et navigateur (`ProjectState`,
-`LogEvent`…). Un `.d.ts` n'émet aucun JavaScript, donc rien ne traîne dans `public/`.
+`LogEvent`…). `computeState()` compose sa réponse **champ par champ** : un spread (`...p`)
+est dispensé par TypeScript du contrôle de propriétés excédentaires, donc il laissait passer
+les champs internes de `Project` jusqu'au navigateur sans que rien ne le signale. Un `.d.ts` n'émet aucun JavaScript, donc rien ne traîne dans `public/`.
 C'est là qu'on ajoute un champ quand la charge utile SSE change — les deux côtés cassent
 alors ensemble, ce qui est tout l'intérêt.
 
@@ -100,16 +102,25 @@ protocole DevTools — Chrome avec `--remote-debugging-port`, puis `Runtime.eval
 `awaitPromise` depuis Node, dont le `WebSocket` global suffit. C'est la seule méthode
 déterministe ici ; plusieurs faux négatifs ont déjà été imputés à tort au code applicatif.
 
-## Configuration : le piège
+## Configuration
 
-`loadConfig()` lit `config.json`, **mais n'en tire que `overrides`**. `rootDir` et
-`scanDepth` viennent de `.env` (`ROOT_DIR`, `SCAN_DEPTH`) malgré ce que suggère le nom de
-la fonction et d'anciennes versions du README. Les variables sont déclarées en tête de
-`server.ts`. `.env` n'est **pas** suivi par git — seul `.env.example` l'est. Il l'a été
+`config.json` ne porte que les `overrides`, et `loadOverrides()` ne lit que ça. `rootDir` et
+`scanDepth` viennent de `.env` (`ROOT_DIR`, `SCAN_DEPTH`), déclarés en tête de `server.ts`.
+La fonction s'est appelée `loadConfig()` et retournait un `rootDir`/`scanDepth` que personne
+ne lisait : le nom envoyait chercher la configuration au mauvais endroit. `.env` n'est **pas** suivi par git — seul `.env.example` l'est. Il l'a été
 jusqu'à MNLCH-18, `DASHBOARD_PASSWORD` compris : l'historique en garde la trace, donc ce
 mot de passe-là est à considérer comme public.
 
 ## Architecture
+
+### Le scan du disque est mis en cache
+
+`listProjects()` est synchrone (`readdirSync`, `readFileSync`) et bloque donc la boucle
+d'évènements. Un cache de `SCAN_TTL_MS` (1500 ms, volontairement plus court que le tour de
+boucle) évite qu'un seul `restart` déclenche trois scans complets. Deux conséquences à
+connaître : `resolveProject()` rescanne de force quand l'identifiant est introuvable (un
+projet tout juste créé ne doit pas répondre 404 le temps que le cache expire), et
+`/api/refresh` appelle `invalidateScan()`.
 
 ### Le flux SSE est le seul canal de mise à jour
 

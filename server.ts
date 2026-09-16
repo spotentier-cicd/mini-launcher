@@ -259,15 +259,12 @@ const WINDOWS = process.platform === "win32";
 const PREFERRED_SCRIPTS = ["dev", "start", "serve"];
 const IGNORED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".turbo", ".cache"]);
 
-function loadConfig(): { rootDir: string; scanDepth: number; overrides: Record<string, Override> } {
-  const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-  const config = JSON.parse(raw);
-  if (!ROOT_DIR) throw new Error("Add \"rootDir\" to config.json (parent directory containing your projects)");
-  return {
-    rootDir: ROOT_DIR,
-    scanDepth: SCAN_DEPTH,
-    overrides: config.overrides || {},
-  };
+// `config.json` ne sert plus qu'à ça : `rootDir` et `scanDepth` viennent de .env
+// (ROOT_DIR, SCAN_DEPTH). La fonction s'appelait loadConfig() et retournait ces
+// deux champs, que personne ne lisait — le nom faisait chercher au mauvais endroit.
+function loadOverrides(): Record<string, Override> {
+  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+  return config.overrides || {};
 }
 
 function makeId(rootDir: string, projectDir: string): string {
@@ -390,16 +387,36 @@ function checkPort(port: number): Promise<boolean> {
 
 // Un seul calcul d'état pour tous les clients, poussé via SSE : les navigateurs
 // n'interrogent plus le serveur en boucle.
-function listProjects(): Project[] {
-  const config = loadConfig();
+
+// Le scan est synchrone (readdirSync, readFileSync) et bloque donc la boucle
+// d'évènements pendant que le SSE diffuse. Il tournait à chaque tour de boucle
+// *et* à chaque route — trois scans complets pour un seul restart. Le cache est
+// délibérément court : plus bref que STATE_INTERVAL_MS, pour qu'un tour de boucle
+// voie toujours le disque tel qu'il est.
+const SCAN_TTL_MS = 1500;
+let scanCache: { at: number; projects: Project[] } | null = null;
+
+function listProjects(fresh = false): Project[] {
+  if (!fresh && scanCache && Date.now() - scanCache.at < SCAN_TTL_MS) return scanCache.projects;
   if (!fs.existsSync(ROOT_DIR)) {
     throw new Error(`Directory not found: ${ROOT_DIR}. Fix "ROOT_DIR" in .env.`);
   }
-  return discoverProjects(ROOT_DIR, SCAN_DEPTH).map((p) => applyOverrides(p, config.overrides));
+  const overrides = loadOverrides();
+  const projects = discoverProjects(ROOT_DIR, SCAN_DEPTH).map((p) => applyOverrides(p, overrides));
+  scanCache = { at: Date.now(), projects };
+  return projects;
+}
+
+function invalidateScan(): void {
+  scanCache = null;
 }
 
 function resolveProject(id: string): Project | null {
-  return listProjects().find((p) => p.id === id) || null;
+  const known = listProjects().find((p) => p.id === id);
+  if (known) return known;
+  // Un projet qui vient d'apparaître sur le disque ne doit pas rester
+  // introuvable le temps que le cache expire : on ne rescanne que sur échec.
+  return listProjects(true).find((p) => p.id === id) || null;
 }
 
 // « starting » = lancé par le dashboard, mais rien ne répond encore sur son port.
@@ -420,14 +437,24 @@ async function computeState(): Promise<ProjectState[]> {
       } else {
         status = portOpen ? "external" : "stopped";
       }
+      // Composé champ par champ, pas étalé : TypeScript dispense un spread du
+      // contrôle de propriétés excédentaires, donc `...p` laissait passer les
+      // champs internes de `Project` (aujourd'hui `pinnedPort`) jusqu'au
+      // navigateur — et laisserait passer tout champ ajouté un jour à `Override`.
       return {
-        ...p,
+        id: p.id,
+        name: p.name,
+        cwd: p.cwd,
+        scripts: p.scripts,
+        defaultScript: p.defaultScript,
         port,
         url,
         status,
         pid: entry ? entry.pid : null,
         startedAt: entry ? entry.startedAt : null,
         adopted: entry ? Boolean(entry.adopted) : false,
+        ...(p.command === undefined ? {} : { command: p.command }),
+        ...(p.args === undefined ? {} : { args: p.args }),
       };
     })
   );
@@ -850,6 +877,7 @@ app.get("/api/projects/:id/logs", (req: Request, res: Response) => {
 
 // Le bouton « Refresh » : force un envoi même si l'état n'a pas bougé.
 app.post("/api/refresh", async (_req: Request, res: Response) => {
+  invalidateScan();
   lastStateJson = "";
   await pushState();
   res.json({ ok: true });
