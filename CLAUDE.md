@@ -105,7 +105,9 @@ déterministe ici ; plusieurs faux négatifs ont déjà été imputés à tort a
 `loadConfig()` lit `config.json`, **mais n'en tire que `overrides`**. `rootDir` et
 `scanDepth` viennent de `.env` (`ROOT_DIR`, `SCAN_DEPTH`) malgré ce que suggère le nom de
 la fonction et d'anciennes versions du README. Les variables sont déclarées en tête de
-`server.ts`. `.env` est suivi par git — attention à ce qu'on y écrit.
+`server.ts`. `.env` n'est **pas** suivi par git — seul `.env.example` l'est. Il l'a été
+jusqu'à MNLCH-18, `DASHBOARD_PASSWORD` compris : l'historique en garde la trace, donc ce
+mot de passe-là est à considérer comme public.
 
 ## Architecture
 
@@ -261,7 +263,7 @@ Branche de travail : `dev`. Branche principale : `main`.
 
 ## Ce qui lance un process est du code sensible
 
-Le dashboard exécute des commandes : deux invariants tiennent tout le reste.
+Le dashboard exécute des commandes : trois invariants tiennent tout le reste.
 
 **Le nom de script vient du réseau.** `req.body.script` traverse `/start` et `/restart`
 jusqu'à `spawnProject()`. Il est validé contre `project.scripts` — une liste blanche lue
