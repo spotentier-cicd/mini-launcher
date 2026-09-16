@@ -106,6 +106,9 @@ const LAUNCHER_ENV_KEYS = new Set([
   "BIND_HOST",
   "LOG_DIR",
   "CONFIG_PATH",
+  "STOP_TIMEOUT_MS",
+  "PORT_RELEASE_TIMEOUT_MS",
+  "LOCKOUT_MS",
 ]);
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -119,7 +122,7 @@ const AUTH_ENABLED = PASSWORD.length > 0;
 const SESSION_COOKIE = "launcher_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
 const MAX_ATTEMPTS = 8;                        // avant blocage temporaire
-const LOCKOUT_MS = 5 * 60 * 1000;
+const LOCKOUT_MS = Number(process.env.LOCKOUT_MS) || 5 * 60 * 1000;
 
 /** @type {Map<string, number>} token de session -> date d'expiration */
 const sessions = new Map<string, number>();
@@ -194,7 +197,10 @@ app.post("/login", (req: Request, res: Response) => {
   }
 
   if (!passwordMatches(req.body.password || "")) {
-    const count = (record ? record.count : 0) + 1;
+    // Un blocage expiré remet le compteur à zéro : sans ça `count` reste à
+    // MAX_ATTEMPTS et la première erreur suivante re-bloque aussitôt, à vie.
+    const expired = Boolean(record && record.lockedUntil);
+    const count = (record && !expired ? record.count : 0) + 1;
     const locked = count >= MAX_ATTEMPTS;
     attempts.set(ip, { count, lockedUntil: locked ? Date.now() + LOCKOUT_MS : 0 });
     logger.warn(locked ? "Trop de tentatives, IP bloquée" : "Mot de passe invalide", { ip, count });
@@ -244,8 +250,9 @@ const MAX_LOG_LINES = 200;
 
 const STATE_INTERVAL_MS = 2000;   // rythme du scan tant qu'un client est connecté
 const READY_TIMEOUT_MS = 30000;   // au-delà, on cesse de sonder le port au démarrage
-const STOP_TIMEOUT_MS = 5000;     // au-delà, on considère l'arrêt acquis
-const PORT_RELEASE_TIMEOUT_MS = 3000; // attente max de libération du port après un arrêt
+const STOP_TIMEOUT_MS = Number(process.env.STOP_TIMEOUT_MS) || 5000; // avant SIGKILL
+const KILL_GRACE_MS = 1000;       // après SIGKILL, avant de renoncer
+const PORT_RELEASE_TIMEOUT_MS = Number(process.env.PORT_RELEASE_TIMEOUT_MS) || 3000;
 
 const WINDOWS = process.platform === "win32";
 
@@ -516,7 +523,9 @@ function persistRunning(): void {
       pid: entry.pid,
       startedAt: entry.startedAt,
       script: entry.script,
-      port: detectedPorts.get(id) || null,
+      // Le port sert de garde-fou anti-réutilisation de PID à la reprise : celui
+      // du .env du projet compte autant que celui lu dans sa sortie.
+      port: detectedPorts.get(id) ?? entry.port ?? null,
     };
   }
   try {
@@ -662,6 +671,17 @@ async function spawnProject(project: Project, script?: string): Promise<ChildPro
     detached: !WINDOWS,
   });
 
+  // Attaché avant toute autre chose : un spawn raté émet « error » sur l'enfant,
+  // et un « error » sans auditeur devient une exception non rattrapée — qui tue
+  // le launcher, donc la supervision de tous les autres projets.
+  child.on("error", (err) => {
+    pushLog(project.id, `Erreur : ${err.message}\n`);
+    logger.error(`Lancement impossible pour ${project.id}`, err);
+    running.delete(project.id);
+    persistRunning();
+    pushState();
+  });
+
   if (child.pid === undefined) {
     throw Object.assign(new Error(`Could not spawn ${command}`), { status: 500 });
   }
@@ -704,14 +724,6 @@ async function spawnProject(project: Project, script?: string): Promise<ChildPro
     pushState();
   });
 
-  child.on("error", (err) => {
-    pushLog(project.id, `Erreur : ${err.message}\n`);
-    logger.error(`Lancement impossible pour ${project.id}`, err);
-    running.delete(project.id);
-    persistRunning();
-    pushState();
-  });
-
   watchUntilReady(project);
   return child;
 }
@@ -735,39 +747,60 @@ function killAndWaitExit(id: string): Promise<boolean> {
     const entry = running.get(id);
     if (!entry) return resolve(false);
 
+    let settled = false;
+    let poll: NodeJS.Timeout | null = null;
+    let escalate: NodeJS.Timeout | null = null;
+    let giveUp: NodeJS.Timeout | null = null;
+
     const finish = () => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       if (poll) clearInterval(poll);
+      if (escalate) clearTimeout(escalate);
+      if (giveUp) clearTimeout(giveUp);
       running.delete(id);
       persistRunning();
       resolve(true);
     };
 
-    let poll: NodeJS.Timeout | null = null;
-    const timer = setTimeout(() => {
-      logger.warn("Le process n'a pas rendu la main dans le délai imparti", { id });
-      finish();
-    }, STOP_TIMEOUT_MS);
-
-    if (entry.proc) {
-      entry.proc.once("exit", finish);
-    } else {
-      // Process réattaché : pas d'évènement exit à écouter, on surveille le PID.
-      poll = setInterval(() => {
-        if (!isAlive(entry.pid)) finish();
-      }, 200);
+    // Le process est déjà sorti : `once("exit")` posé maintenant n'entendrait
+    // plus rien et on attendrait STOP_TIMEOUT_MS pour un arrêt déjà acquis.
+    if (entry.proc && (entry.proc.exitCode !== null || entry.proc.signalCode !== null)) {
+      return finish();
     }
 
-    try {
-      process.kill(-entry.pid, "SIGTERM");
-    } catch (e) {
-      logger.warn(`Arrêt du groupe de process impossible, repli sur le process seul : ${asError(e).message}`, { id });
+    const signal = (sig: NodeJS.Signals): void => {
       try {
-        process.kill(entry.pid, "SIGTERM");
+        process.kill(-entry.pid, sig); // le groupe : npm et ce qu'il a lancé
       } catch {
-        finish(); // déjà mort
+        try {
+          process.kill(entry.pid, sig);
+        } catch {
+          finish(); // plus personne à qui parler
+        }
       }
-    }
+    };
+
+    if (entry.proc) entry.proc.once("exit", finish);
+    // Le sondage du PID couvre les process réadoptés (pas de pipes, donc pas
+    // d'évènement « exit ») et sert de confirmation après un SIGKILL.
+    poll = setInterval(() => {
+      if (!isAlive(entry.pid)) finish();
+    }, 200);
+
+    signal("SIGTERM");
+
+    // Déclarer l'arrêt acquis sans vérifier laisserait un process vivant hors de
+    // `running` et hors du registre : plus rien ne le suit, plus rien ne peut
+    // l'arrêter, et le port qu'il tient fera échouer le prochain démarrage.
+    escalate = setTimeout(() => {
+      logger.warn("Toujours vivant après SIGTERM, escalade en SIGKILL", { id, pid: entry.pid });
+      signal("SIGKILL");
+      giveUp = setTimeout(() => {
+        logger.error("Process survivant à SIGKILL", { id, pid: entry.pid });
+        finish();
+      }, KILL_GRACE_MS);
+    }, STOP_TIMEOUT_MS);
   });
 }
 
@@ -776,11 +809,22 @@ async function stopProject(id: string): Promise<boolean> {
   const entry = running.get(id);
   if (!entry) return false;
   const port = detectedPorts.get(id) || entry.port || null;
+  const pid = entry.pid; // relevé avant : killAndWaitExit vide l'entrée
 
   await killAndWaitExit(id);
+  if (!port || (await waitPortRelease(port))) return true;
 
-  if (port && !(await waitPortRelease(port))) {
-    logger.warn(`Port ${port} toujours occupé après l'arrêt`, { id });
+  // `npm` sort volontiers en laissant vivre ce qu'il a lancé : c'est ce
+  // petit-fils qui tient la socket. Rendre la main ici sur un port occupé ferait
+  // refuser le démarrage suivant en 409, à cause de notre propre reliquat.
+  logger.warn(`Port ${port} toujours occupé après SIGTERM, escalade en SIGKILL`, { id, pid });
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // le groupe a disparu entre-temps : quelqu'un d'autre tient ce port
+  }
+  if (!(await waitPortRelease(port))) {
+    logger.error(`Port ${port} toujours occupé après SIGKILL`, { id, pid });
   }
   return true;
 }

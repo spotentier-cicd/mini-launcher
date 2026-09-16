@@ -108,6 +108,64 @@ describe("démarrage et arrêt", () => {
   });
 });
 
+describe("arrêt d'un process récalcitrant", () => {
+  it("escalade en SIGKILL quand SIGTERM est ignoré", async () => {
+    const port = await freePort();
+    const root = makeRoot();
+    // npm sort proprement sur SIGTERM ; c'est son petit-fils qui l'ignore et
+    // garde la socket. Sans escalade, /stop rendait la main port occupé.
+    addProject(root, "tetu", {
+      source: `
+        process.on("SIGTERM", () => {});
+        require("node:net").createServer().listen(${port}, () => console.log("up"));
+      `,
+      env: `PORT=${port}\n`,
+    });
+    const launcher = await startLauncher({
+      root,
+      env: { STOP_TIMEOUT_MS: "500", PORT_RELEASE_TIMEOUT_MS: "800" },
+    });
+
+    await launcher.post("/api/projects/tetu/start", { script: "dev" });
+    await waitFor(async () => (await launcher.project("tetu"))?.status === "running", {
+      label: "démarrage",
+    });
+
+    expect((await launcher.post("/api/projects/tetu/stop")).status).toBe(200);
+
+    expect(await portOpen(port)).toBe(false);
+    expect(launcher.registry().tetu).toBeUndefined();
+    expect((await launcher.project("tetu"))!.status).toBe("stopped");
+    // Le port peut se libérer pour d'autres raisons : on veut que ce soit
+    // bien l'escalade qui l'ait fait, sinon le test ne prouve rien.
+    expect(launcher.errorLog()).toMatch(/escalade en SIGKILL/);
+  });
+
+  /**
+   * Régression : le garde `child.pid === undefined` jetait avant que le listener
+   * « error » ne soit posé. L'évènement devenait une exception non rattrapée et
+   * le launcher s'arrêtait — emportant la supervision de tous les autres projets.
+   */
+  it("survit à un lancement impossible", async () => {
+    const root = makeRoot();
+    addProject(root, "fantome");
+    const launcher = await startLauncher({
+      root,
+      config: { overrides: { fantome: { command: "/chemin/inexistant/binaire" } } },
+    });
+
+    const res = await launcher.post("/api/projects/fantome/start", {});
+    expect(res.status).toBeGreaterThanOrEqual(400);
+
+    // Le point du test : le dashboard répond encore.
+    expect((await launcher.fetch("/api/projects")).status).toBe(200);
+    expect((await launcher.project("fantome"))!.pid).toBeNull();
+    await waitFor(() => launcher.errorLog().includes("Lancement impossible"), {
+      label: "journalisation de l'échec",
+    });
+  });
+});
+
 describe("redémarrage", () => {
   it("attend la libération du port quand l'enfant traîne à sortir", async () => {
     const port = await freePort();

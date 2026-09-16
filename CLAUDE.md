@@ -138,6 +138,13 @@ Une entrée de `running` vaut `{ pid, startedAt, script, proc, adopted, port }`.
 `entry.pid`. Tout code qui écoute `entry.proc.once("exit")` doit prévoir le cas `adopted`
 (`stopProject()` surveille alors le PID par sondage).
 
+**Un arrêt n'est jamais déclaré acquis sans preuve.** `killAndWaitExit()` escalade en
+`SIGKILL` si le process n'est pas sorti dans `STOP_TIMEOUT_MS`, et `stopProject()`
+recommence au niveau du groupe si le port reste occupé : `npm` sort volontiers en laissant
+vivre ce qu'il a lancé. Supprimer l'entrée de `running` sans vérifier créerait un process
+que plus rien ne suit — absent du registre, donc jamais réadopté, réapparaissant en
+`external`, et dont le port fait échouer le démarrage suivant en 409.
+
 `pushLog()` est le seul point d'entrée pour ajouter de la sortie : il incrémente `logSeq`
 (compteur monotone par projet) et diffuse le chunk. Le client compare les numéros, détecte
 un trou et se resynchronise via `GET /api/projects/:id/logs`, qui renvoie `{ logs, seq }`.

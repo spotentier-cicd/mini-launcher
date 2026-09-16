@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { addProject, cleanupAll, makeRoot, startLauncher } from "./helpers.js";
+import { addProject, cleanupAll, makeRoot, startLauncher, waitFor } from "./helpers.js";
 
 afterEach(cleanupAll);
 
@@ -75,6 +75,25 @@ describe("barrière d'authentification", () => {
     const res = await launcher.login(PASSWORD);
     expect(res.headers.get("location")).toBe("/login?error=locked");
     expect(launcher.errorLog()).toMatch(/Trop de tentatives/);
+  });
+
+  it("rend un budget complet de tentatives une fois le blocage expiré", async () => {
+    const root = makeRoot();
+    addProject(root, "demo");
+    const launcher = await startLauncher({ root, password: PASSWORD, env: { LOCKOUT_MS: "1000" } });
+
+    for (let i = 0; i < 8; i++) await launcher.login("mauvais");
+    expect((await launcher.login(PASSWORD)).headers.get("location")).toBe("/login?error=locked");
+
+    // Une tentative pendant le blocage ne compte pas : dès que « invalid »
+    // revient, c'est que le blocage est levé et que le compteur est reparti à 1.
+    await waitFor(
+      async () => (await launcher.login("mauvais")).headers.get("location") === "/login?error=invalid",
+      { label: "expiration du blocage" }
+    );
+
+    // Le compteur était resté à 8 : cette seule erreur re-bloquait cinq minutes.
+    expect((await launcher.login(PASSWORD)).headers.get("location")).toBe("/");
   });
 
   it("désactive l'authentification quand le mot de passe est vide, avec un avertissement", async () => {
