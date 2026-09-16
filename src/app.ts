@@ -86,106 +86,77 @@ function escapeHtml(value: string | number | null | undefined): string {
 
 /* ---------------------------------------------------------------- rendu --- */
 
+/**
+ * Le board n'est plus reconstruit à chaque évènement : chaque projet garde sa
+ * ligne, qu'on met à jour sur place. Repartir d'un DOM neuf faisait perdre le
+ * défilement des logs, le script choisi et le focus — à chaque changement d'état,
+ * c'est-à-dire pendant qu'on lisait une erreur.
+ */
+const rowsById = new Map<string, HTMLElement>();
+/** Dernier état connu par projet : les écouteurs le relisent ici plutôt que de le capturer. */
+const stateById = new Map<string, ProjectState>();
+
+function isLive(project: ProjectState): boolean {
+  return project.status === "running" || project.status === "starting";
+}
+
 // Start et Restart partagent le même emplacement : quand un projet tourne,
 // Start n'a plus de sens et la place sert à le relancer.
 function setAction(btn: HTMLElement, mode: "start" | "restart"): void {
   const restart = mode === "restart";
   // toggleAttribute et pas .hidden : cette propriété est définie sur HTMLElement,
   // un élément SVG ne la reflète pas dans l'attribut.
-  btn.querySelector(".icon-start")?.toggleAttribute("hidden", restart);
-  btn.querySelector(".icon-restart")?.toggleAttribute("hidden", !restart);
-  const label = btn.querySelector(".start-label");
-  if (label) label.textContent = restart ? "Restart" : "Start";
+  pick(btn, ".icon-start").toggleAttribute("hidden", restart);
+  pick(btn, ".icon-restart").toggleAttribute("hidden", !restart);
+  pick(btn, ".start-label").textContent = restart ? "Restart" : "Start";
 }
 
-function renderRow(project: ProjectState): HTMLElement {
+// Ne touche au <select> que si la liste des scripts a bougé : le reconstruire
+// à chaque évènement ramenait le choix de l'utilisateur sur le script par défaut.
+function syncScripts(select: HTMLSelectElement, project: ProjectState): void {
+  const scripts = project.scripts || [];
+  const unchanged =
+    select.options.length === scripts.length &&
+    scripts.every((name, i) => select.options[i]?.value === name);
+
+  if (!unchanged) {
+    const previous = select.value;
+    select.textContent = "";
+    for (const name of scripts) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    }
+    select.value = scripts.includes(previous) ? previous : project.defaultScript ?? scripts[0] ?? "";
+  }
+  // Commande fixe (override) ou un seul script possible : rien à choisir.
+  select.classList.toggle("hidden", Boolean(project.command) || scripts.length <= 1);
+}
+
+/** Crée la ligne d'un projet et pose ses écouteurs, une fois pour toutes. */
+function createRow(id: string): HTMLElement {
   const template = rowTemplate.content.firstElementChild;
   if (!template) throw new Error("#row-template est vide");
-  const node = template.cloneNode(true) as HTMLElement;
-  node.dataset.id = project.id;
-  node.dataset.status = project.status;
+  const row = template.cloneNode(true) as HTMLElement;
+  row.dataset.id = id;
 
-  pick(node, ".row-name").textContent = project.name;
-  pick(node, ".row-path").textContent = project.cwd;
-
-  const portEl = pick(node, ".row-port");
-  if (project.port) {
-    const chip = document.createElement("span");
-    chip.className = "port-chip";
-    chip.textContent = `:${project.port}`;
-    portEl.appendChild(chip);
-  }
-  const badge = document.createElement("span");
-  badge.className = "status-badge";
-  badge.textContent = STATUS_LABEL[project.status] || project.status;
-  const hint = STATUS_HINT[project.status];
-  if (hint) badge.title = hint;
-  if (project.adopted) {
-    badge.title = "Reattached after a launcher restart — logs from the previous session are lost";
-  }
-  portEl.appendChild(badge);
-
-  const live = project.status === "running" || project.status === "starting";
-  const reachable = project.status === "running" || project.status === "external";
-
-  // Le lien n'est actif qu'une fois le port confirmé : plus de clic dans le vide
-  // pendant les secondes que met un dev server à écouter.
-  const openBtn = pick<HTMLAnchorElement>(node, ".open");
-  if (!project.url) {
-    openBtn.hidden = true;
-  } else if (reachable) {
-    openBtn.href = project.url;
-  } else {
-    openBtn.classList.add("disabled");
-    openBtn.setAttribute("aria-disabled", "true");
-    openBtn.title = "Waiting for the port to answer";
-  }
-
-  const actionBtn = pick<HTMLButtonElement>(node, ".start");
-  const stopBtn = pick<HTMLButtonElement>(node, ".stop");
-  const logsBtn = pick<HTMLButtonElement>(node, ".logs-toggle");
-  const logsEl = pick(node, ".logs");
-  const scriptSelect = pick<HTMLSelectElement>(node, ".script-select");
-
-  const scripts = project.scripts || [];
-  if (project.command || scripts.length <= 1) {
-    // commande fixe (override) ou un seul script possible : pas besoin de choisir
-    scriptSelect.classList.add("hidden");
-  } else {
-    scripts.forEach((s: string) => {
-      const opt = document.createElement("option");
-      opt.value = s;
-      opt.textContent = s;
-      if (s === project.defaultScript) opt.selected = true;
-      scriptSelect.appendChild(opt);
-    });
-  }
-
-  setAction(actionBtn, live ? "restart" : "start");
-  scriptSelect.disabled = live;
-  stopBtn.disabled = !live;
-  actionBtn.disabled = false;
-
-  if (project.status === "external") {
-    actionBtn.disabled = true;
-    actionBtn.title = "Launched outside the dashboard";
-    // Non géré par nous, mais on sait quel port est occupé : on peut proposer
-    // de tuer le process qui le tient, après confirmation explicite.
-    stopBtn.disabled = !project.port;
-    stopBtn.classList.toggle("force", Boolean(project.port));
-    stopBtn.title = project.port
-      ? `Not started by the dashboard — force stop whatever listens on port ${project.port}`
-      : "Not started by the dashboard, and no known port to identify it";
-  } else if (!live && !project.command && scripts.length === 0) {
-    actionBtn.disabled = true;
-    actionBtn.title = "No npm script detected in package.json";
-  }
+  const actionBtn = pick<HTMLButtonElement>(row, ".start");
+  const stopBtn = pick<HTMLButtonElement>(row, ".stop");
+  const logsBtn = pick<HTMLButtonElement>(row, ".logs-toggle");
+  const logsEl = pick(row, ".logs");
+  const scriptSelect = pick<HTMLSelectElement>(row, ".script-select");
 
   actionBtn.addEventListener("click", () => {
-    actionBtn.disabled = true; // anti double-clic ; le prochain état rétablit le bouton
-    act(project.id, live ? "restart" : "start", { script: scriptSelect.value });
+    const project = stateById.get(id);
+    if (!project) return;
+    actionBtn.disabled = true; // anti double-clic ; act() le rétablit quoi qu'il arrive
+    void act(id, isLive(project) ? "restart" : "start", { script: scriptSelect.value }, actionBtn);
   });
+
   stopBtn.addEventListener("click", async () => {
+    const project = stateById.get(id);
+    if (!project) return;
     const force = project.status === "external";
     if (force) {
       const ok = await askConfirm({
@@ -199,40 +170,138 @@ function renderRow(project: ProjectState): HTMLElement {
       if (!ok) return;
     }
     stopBtn.disabled = true;
-    act(project.id, "stop", force ? { force: true } : {});
+    void act(id, "stop", force ? { force: true } : {}, stopBtn);
   });
 
   logsBtn.addEventListener("click", () => {
     const open = logsEl.classList.toggle("hidden") === false;
     logsBtn.setAttribute("aria-expanded", String(open));
     if (open) {
-      openLogRows.add(project.id);
-      loadLogs(project.id, logsEl);
+      openLogRows.add(id);
+      void loadLogs(id, logsEl);
     } else {
-      openLogRows.delete(project.id);
+      openLogRows.delete(id);
     }
   });
 
-  if (openLogRows.has(project.id)) {
+  // Une ligne qui réapparaît (projet retiré puis revenu) retrouve son panneau ouvert.
+  if (openLogRows.has(id)) {
     logsEl.classList.remove("hidden");
     logsBtn.setAttribute("aria-expanded", "true");
-    loadLogs(project.id, logsEl);
+    void loadLogs(id, logsEl);
   }
 
-  return node;
+  return row;
+}
+
+/** Reporte l'état sur une ligne existante. Ne touche jamais au panneau de logs. */
+function applyState(row: HTMLElement, project: ProjectState): void {
+  row.dataset.status = project.status;
+  pick(row, ".row-name").textContent = project.name;
+  pick(row, ".row-path").textContent = project.cwd;
+
+  const portEl = pick(row, ".row-port");
+  portEl.textContent = "";
+  if (project.port) {
+    const chip = document.createElement("span");
+    chip.className = "port-chip";
+    chip.textContent = `:${project.port}`;
+    portEl.appendChild(chip);
+  }
+  const badge = document.createElement("span");
+  badge.className = "status-badge";
+  badge.textContent = STATUS_LABEL[project.status] || project.status;
+  const hint = project.adopted
+    ? "Reattached after a launcher restart — logs from the previous session are lost"
+    : STATUS_HINT[project.status];
+  if (hint) badge.title = hint;
+  portEl.appendChild(badge);
+
+  const live = isLive(project);
+  const reachable = project.status === "running" || project.status === "external";
+
+  // Le lien n'est actif qu'une fois le port confirmé : plus de clic dans le vide
+  // pendant les secondes que met un dev server à écouter.
+  const openBtn = pick<HTMLAnchorElement>(row, ".open");
+  openBtn.hidden = !project.url;
+  openBtn.classList.toggle("disabled", Boolean(project.url) && !reachable);
+  if (project.url) openBtn.href = project.url;
+  if (project.url && !reachable) {
+    openBtn.setAttribute("aria-disabled", "true");
+    openBtn.title = "Waiting for the port to answer";
+  } else {
+    openBtn.removeAttribute("aria-disabled");
+    openBtn.removeAttribute("title");
+  }
+
+  const actionBtn = pick<HTMLButtonElement>(row, ".start");
+  const stopBtn = pick<HTMLButtonElement>(row, ".stop");
+  const scriptSelect = pick<HTMLSelectElement>(row, ".script-select");
+
+  syncScripts(scriptSelect, project);
+  setAction(actionBtn, live ? "restart" : "start");
+  scriptSelect.disabled = live;
+
+  actionBtn.disabled = false;
+  actionBtn.removeAttribute("title");
+  stopBtn.disabled = !live;
+  stopBtn.removeAttribute("title");
+  stopBtn.classList.remove("force");
+
+  if (project.status === "external") {
+    actionBtn.disabled = true;
+    actionBtn.title = "Launched outside the dashboard";
+    // Non géré par nous, mais on sait quel port est occupé : on peut proposer
+    // de tuer le process qui le tient, après confirmation explicite.
+    stopBtn.disabled = !project.port;
+    stopBtn.classList.toggle("force", Boolean(project.port));
+    stopBtn.title = project.port
+      ? `Not started by the dashboard — force stop whatever listens on port ${project.port}`
+      : "Not started by the dashboard, and no known port to identify it";
+  } else if (!live && !project.command && (project.scripts || []).length === 0) {
+    actionBtn.disabled = true;
+    actionBtn.title = "No npm script detected in package.json";
+  }
+}
+
+function dropRow(id: string): void {
+  rowsById.get(id)?.remove();
+  rowsById.delete(id);
+  stateById.delete(id);
 }
 
 function render(projects: ProjectState[]): void {
-  subtitle.textContent = `${projects.length} project${projects.length > 1 ? "s" : ""} configured`;
-  board.textContent = "";
+  subtitle.textContent = `${projects.length} project${projects.length === 1 ? "" : "s"} configured`;
+
   if (projects.length === 0) {
     showMessage("No project found under ROOT_DIR. Add one to get started.");
     return;
   }
-  projects.forEach((p) => board.appendChild(renderRow(p)));
+
+  const incoming = new Set(projects.map((p) => p.id));
+  for (const id of Array.from(rowsById.keys())) if (!incoming.has(id)) dropRow(id);
+
+  // Purge ce qui n'est pas une ligne gérée : le « Loading… » initial, le
+  // <noscript>, ou un message d'erreur laissé par un évènement `failure`.
+  for (const node of Array.from(board.children)) {
+    if (!(node instanceof HTMLElement) || node.dataset.id === undefined) node.remove();
+  }
+
+  projects.forEach((project, index) => {
+    let row = rowsById.get(project.id);
+    if (!row) {
+      row = createRow(project.id);
+      rowsById.set(project.id, row);
+    }
+    stateById.set(project.id, project);
+    applyState(row, project);
+    // Ne déplacer que si la position a changé : réinsérer coûte le focus.
+    if (board.children[index] !== row) board.insertBefore(row, board.children[index] ?? null);
+  });
 }
 
 function showMessage(text: string): void {
+  for (const id of Array.from(rowsById.keys())) dropRow(id);
   board.textContent = "";
   const msg = document.createElement("p");
   msg.className = "empty";
@@ -270,10 +339,11 @@ function appendLog({ id, seq, chunk }: LogEvent): void {
   const logsEl = logsElFor(id);
   if (!logsEl) return;
 
+  // Tout écart resynchronise : un trou dans le flux, mais aussi un compteur
+  // reparti de zéro parce que le serveur a redémarré sous l'onglet ouvert.
   const expected = (logSeqById.get(id) || 0) + 1;
-  if (seq < expected) return; // déjà appliqué
-  if (seq > expected) {
-    void loadLogs(id, logsEl); // trou dans le flux : on resynchronise
+  if (seq !== expected) {
+    void loadLogs(id, logsEl);
     return;
   }
 
@@ -288,7 +358,12 @@ function appendLog({ id, seq, chunk }: LogEvent): void {
 
 /* --------------------------------------------------------------- actions --- */
 
-async function act(id: string, action: string, body?: Record<string, unknown>): Promise<void> {
+async function act(
+  id: string,
+  action: string,
+  body?: Record<string, unknown>,
+  button?: HTMLButtonElement
+): Promise<void> {
   try {
     const res = await fetch(`/api/projects/${id}/${action}`, {
       method: "POST",
@@ -304,6 +379,11 @@ async function act(id: string, action: string, body?: Record<string, unknown>): 
     if (data.killed) toast(`Stopped ${data.killed.command} (PID ${data.killed.pid})`);
   } catch (e) {
     toast(`${describeError(e)} : Error contacting server`);
+  } finally {
+    // Un refus (409, 404) ne change pas l'état, donc aucun évènement `projects`
+    // n'arrive : sans ce rétablissement le bouton restait grisé indéfiniment.
+    // Le prochain état, lui, reposera la valeur qui convient.
+    if (button) button.disabled = false;
   }
   // Le nouvel état arrive par le flux : rien à recharger ici.
 }

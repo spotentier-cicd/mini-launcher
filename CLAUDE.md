@@ -230,11 +230,22 @@ markup casse le rendu silencieusement :
 Ce contrat passe désormais par `pick()`, qui lève avec le sélecteur fautif au lieu de
 laisser le rendu échouer en silence.
 
-Le board est intégralement re-rendu à chaque évènement `projects`. C'est acceptable parce
-que ces évènements n'arrivent que sur changement réel.
+**Le board n'est pas reconstruit** : `render()` réconcilie par `data-id` — chaque projet
+garde sa ligne, `applyState()` la met à jour sur place, et seules les lignes apparues ou
+disparues touchent au DOM. Repartir d'un DOM neuf à chaque évènement faisait perdre le
+défilement des logs, le script sélectionné et le focus, précisément pendant qu'on lisait
+une erreur. Conséquence : les écouteurs sont posés une seule fois, dans `createRow()`, et
+relisent l'état courant dans `stateById` au lieu de le capturer.
+
+`applyState()` doit **remettre à zéro ce qu'elle pose** (titres, `disabled`, classes) :
+une ligne réutilisée garde sinon l'habillage de son état précédent.
 
 **Start et Restart partagent un seul bouton** (`.start`) : `setAction()` permute les icônes
 et le libellé selon l'état.
+
+Un bouton grisé pendant une action est rétabli par le `finally` d'`act()`, jamais par
+l'évènement suivant : une action refusée (409, 404) ne change rien à l'état, donc rien
+n'arrive et le bouton resterait grisé.
 
 ### Journalisation
 
