@@ -18,7 +18,7 @@ function describe(value: unknown): string {
       return "[objet non sérialisable]"; // référence circulaire
     }
   }
-  return String(value as any);
+  return String(value as number | boolean | bigint | symbol | null | undefined);
 }
 
 /** Ce que winston passe à un formateur `printf`. */
@@ -64,7 +64,7 @@ const logger = winston.createLogger({
     new winston.transports.Console({
       format: winston.format.combine(
         winston.format.colorize(),
-              winston.format.printf(({ level, message }: LogInfo) => `${level}: ${describe(message)}`)
+        winston.format.printf(({ level, message }: LogInfo) => `${level}: ${describe(message)}`)
       ),
     }),
   ],

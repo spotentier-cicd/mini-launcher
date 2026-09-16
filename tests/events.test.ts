@@ -47,7 +47,10 @@ async function openEvents(launcher: Launcher): Promise<SseStream> {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        let split;
+        let split: number;
+        // Découpage de trames : tester la présence du séparateur et retenir sa
+        // position sont la même opération.
+        // biome-ignore lint/suspicious/noAssignInExpressions: affectation voulue
         while ((split = buffer.indexOf("\n\n")) !== -1) {
           const frame = buffer.slice(0, split);
           buffer = buffer.slice(split + 2);

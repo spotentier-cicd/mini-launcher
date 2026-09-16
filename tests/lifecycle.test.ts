@@ -10,7 +10,7 @@ import {
   startLauncher,
   waitFor,
 } from "./helpers.js";
-import type { LogsResponse, ProjectState } from "../src/types.js";
+import type { LogsResponse } from "../src/types.js";
 
 afterEach(cleanupAll);
 

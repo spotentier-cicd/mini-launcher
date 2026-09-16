@@ -27,6 +27,11 @@ jobs:
       - name: Vérifier les types
         run: npm run typecheck
 
+      # typescript-eslint ne supporte pas encore TypeScript 7 : Biome a son
+      # propre parseur, donc pas de dépendance au paquet typescript.
+      - name: Linter
+        run: npm run lint
+
       # Le navigateur ne lit pas de TypeScript : on s'assure que l'émission
       # de public/app.js fonctionne, pas seulement le typage.
       - name: Compiler le front

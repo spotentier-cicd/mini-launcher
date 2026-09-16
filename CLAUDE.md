@@ -15,6 +15,7 @@ npm start          # compile le front puis démarre le dashboard (port depuis .e
 npm run build      # régénère public/app.js depuis src/app.ts
 npm run build:watch
 npm run typecheck  # les trois contextes : serveur, navigateur, tests
+npm run lint       # biome
 ```
 
 ## TypeScript : deux régimes différents
@@ -285,6 +286,17 @@ Les `exceptionHandlers` natifs de winston **ne sont volontairement pas utilisés
 - **Le scroll des logs ne doit recoller en bas que si on y était déjà**, sinon la vue est
   arrachée à quelqu'un qui est remonté lire une erreur.
 - `child.on("exit")` reçoit `code === null` quand le process est tué par signal.
+
+## Linter
+
+`npm run lint` (Biome). Le choix n'est pas esthétique : `typescript-eslint` plafonne à
+TypeScript < 6.1 et refuse la version 7 du projet, alors que Biome embarque son propre
+parseur. `noNonNullAssertion` est désactivé — `(await launcher.project("x"))!.status` dit
+exactement ce qu'un test veut dire. Deux suppressions ponctuelles, chacune commentée :
+l'échappement ANSI de `ANSI_RE` et l'affectation en condition du découpeur de trames SSE.
+
+`noUnusedLocals` / `noUnusedParameters` sont actifs dans `tsconfig.base.json` : le typecheck
+et le linter se recoupent, mais le premier tourne aussi dans l'éditeur.
 
 ## Convention de commit
 

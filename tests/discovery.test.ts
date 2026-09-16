@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { addProject, cleanupAll, makeRoot, startLauncher } from "./helpers.js";
-import type { LogsResponse, ProjectState } from "../src/types.js";
+import type { ProjectState } from "../src/types.js";
 
 afterEach(cleanupAll);
 

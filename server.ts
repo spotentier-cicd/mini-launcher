@@ -64,10 +64,9 @@ interface Override {
 /** Une erreur portant le code HTTP à renvoyer au client. */
 type HttpError = Error & { status?: number };
 
-/** Les types d'Express admettent un paramètre absent ou multiple. */
+/** `noUncheckedIndexedAccess` rend `req.params.id` optionnel : on le ramène à une chaîne. */
 function paramId(req: Request): string {
-  const value = req.params.id;
-  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+  return req.params.id ?? "";
 }
 
 /**
@@ -211,7 +210,7 @@ app.post("/login", (req: Request, res: Response) => {
   if (!passwordMatches(req.body.password || "")) {
     // Un blocage expiré remet le compteur à zéro : sans ça `count` reste à
     // MAX_ATTEMPTS et la première erreur suivante re-bloque aussitôt, à vie.
-    const expired = Boolean(record && record.lockedUntil);
+    const expired = Boolean(record?.lockedUntil);
     const count = (record && !expired ? record.count : 0) + 1;
     const locked = count >= MAX_ATTEMPTS;
     attempts.set(ip, { count, lockedUntil: locked ? Date.now() + LOCKOUT_MS : 0, seenAt: Date.now() });
@@ -261,6 +260,9 @@ const STATE_PATH = path.join(STATE_DIR, "running.json");
 // Vite, Next, Hono… annoncent tous leur adresse au démarrage. La lire évite de
 // dépendre d'un PORT dans le .env du projet, que la plupart n'ont pas.
 const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})/;
+// L'échappement ANSI est exactement ce qu'on cherche ici : sans ce nettoyage, les
+// URL colorées d'un Vite passent à travers URL_RE et le port n'est pas détecté.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: caractère de contrôle voulu
 const ANSI_RE = /\u001B\[[0-9;]*[a-zA-Z]/g;
 const MAX_LOG_LINES = 200;
 // MAX_LOG_LINES compte des chunks, pas des octets : sans plafond, un projet qui
@@ -301,7 +303,7 @@ function detectPort(dir: string): number | null {
     try {
       const content = fs.readFileSync(envPath, "utf-8");
       const m = content.match(/^(?:[ \t]*)PORT[ \t]*=[ \t]*(\d+)/m);
-      if (m && m[1]) return Number.parseInt(m[1], 10);
+      if (m?.[1]) return Number.parseInt(m[1], 10);
     } catch {
       // fichier illisible, on ignore
     }
@@ -334,7 +336,7 @@ function discoverProjects(rootDir: string, maxDepth: number): Project[] {
       return; // ne pas descendre dans un projet déjà détecté
     }
     if (depth >= maxDepth) return;
-    let entries;
+    let entries: import("node:fs").Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
@@ -542,7 +544,7 @@ async function pushState(): Promise<void> {
   }
   pushing = true;
   try {
-    let state;
+    let state: ProjectState[];
     try {
       state = await computeState();
     } catch (e) {
@@ -671,7 +673,7 @@ function isAlive(pid: number): boolean {
 }
 
 async function recoverOrphans() {
-  let snapshot;
+  let snapshot: Record<string, PersistedEntry>;
   try {
     snapshot = JSON.parse(fs.readFileSync(STATE_PATH, "utf-8"));
   } catch {
@@ -1019,7 +1021,7 @@ app.post("/api/projects/:id/restart", asyncRoute(async (req: Request, res: Respo
     }
     // On relit le script en cours avant d'arrêter, pour repartir à l'identique.
     const entry = running.get(project.id);
-    const script = req.body.script || (entry && entry.script) || undefined;
+    const script = req.body.script || entry?.script || undefined;
 
     await stopProject(project.id);
     const child = await spawnProject(project, script);
@@ -1044,7 +1046,7 @@ app.post("/api/projects/:id/stop", asyncRoute(async (req: Request, res: Response
   // process a été démarré depuis un terminal, ou par un launcher antérieur au
   // registre. Sur demande explicite, on tue ce qui occupe le port.
   if (req.body.force) {
-    let project;
+    let project: Project | null;
     try {
       project = resolveProject(paramId(req));
     } catch (e) {
@@ -1103,6 +1105,12 @@ if (!LOOPBACK_HOSTS.has(BIND_HOST) && !AUTH_ENABLED) {
       "renseigne DASHBOARD_PASSWORD, ou reviens sur 127.0.0.1."
   );
   process.exit(1);
+}
+
+// `public/app.js` est produit par `npm run build` et n'est pas versionné. Sans
+// lui la page se charge, ne fait rien, et ne laisse aucune trace côté serveur.
+if (!fs.existsSync(path.join(__dirname, "public", "app.js"))) {
+  logger.warn("public/app.js est absent : lance `npm run build`, sinon le tableau de bord restera vide.");
 }
 
 app.listen(PORT, BIND_HOST, () => {
